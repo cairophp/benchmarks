@@ -3,13 +3,16 @@
 # ROUNDS times per case, so drift (heat, background load) hits both alike.
 # Prints the median requests per second of each and the change.
 #
-#   bench/ab.sh old/cairo new/cairo                 # hello json pgsql mysql curl
-#   CASES="hello mysql" ROUNDS=5 bench/ab.sh a b
+#   ./ab.sh old/cairo new/cairo                 # hello json pgsql mysql curl
+#   CASES="hello mysql" ROUNDS=5 ./ab.sh a b
 #
-# Needs wrk, Go, and the databases seeded by run.sh.
+# Needs wrk, Go, the databases seeded by run.sh, and a checkout of
+# cairophp/cairo for the greeter example: CAIRO_REPO, by default ../cairo.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
+CAIRO_REPO=$(cd "${CAIRO_REPO:-$here/../cairo}" && pwd)
+export CAIRO_REPO
 A=$1
 B=$2
 WRK=${WRK:-wrk}
@@ -26,7 +29,7 @@ declare -A conns=([hello]=64 [json]=64 [cpu]=64 [sleep]=256 [curl]=256 [client]=
 
 work=$(mktemp -d)
 trap 'kill ${server_pid:-} ${upstream_pid:-} 2> /dev/null || true; rm -rf "$work"' EXIT
-go build -o "$work/upstream" "$here/upstream"
+go build -C "$here" -o "$work/upstream" ./upstream
 taskset -c "$UPSTREAM_CPUS" "$work/upstream" -addr :9100 > /dev/null 2>&1 &
 upstream_pid=$!
 

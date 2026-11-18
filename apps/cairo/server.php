@@ -19,7 +19,10 @@ use Helloworld\HelloRequest;
 use Helloworld\SlowHelloRequest;
 
 require __DIR__ . '/../workload.php';
-require __DIR__ . '/../../../examples/greeter/gen/autoload.php';
+
+// The greeter example lives in the Cairo repository (run.sh sets CAIRO_REPO).
+$greeter = (getenv('CAIRO_REPO') ?: __DIR__ . '/../../../cairo') . '/examples/greeter';
+require $greeter . '/gen/autoload.php';
 
 final class Greeter implements GreeterInterface
 {
@@ -109,7 +112,7 @@ $http->get('/sql-mysql', fn (): Response => $json(json_encode(
 )));
 
 $app->grpc(':9000')
-    ->proto(__DIR__ . '/../../../examples/greeter/proto/helloworld.proto')
+    ->proto($greeter . '/proto/helloworld.proto')
     ->service('helloworld.Greeter', Greeter::class);
 
 return $app;

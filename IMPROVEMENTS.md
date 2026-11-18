@@ -1,7 +1,7 @@
 # Performance work log
 
 What was changed to make Cairo faster, why, and what each change measured.
-Every number comes from `bench/run.sh` (or a smaller run of the same cases)
+Every number comes from `run.sh` (or a smaller run of the same cases)
 on the machine described in [README.md](README.md): an i7-8565U laptop, the
 server pinned to two physical cores, PHP 8.5.12 with opcache. Numbers on this
 machine move by 5-10 % between runs, so a change is only kept when it shows
@@ -191,7 +191,7 @@ MySQL point queries +15 %.
 
 ## 4. A working profiler, and responses without JSON (commits 6e53913, 0b8bb7e)
 
-From here each step is measured with `bench/ab.sh`, which runs the previous
+From here each step is measured with `ab.sh`, which runs the previous
 build and the new one in turns on the same machine state (three rounds per
 case, median). By this point the laptop ran about 15 % slower than in the
 morning (the `cpu` case, which no change touches, went from 4.0k to 3.4k),
@@ -222,7 +222,7 @@ body; C writes the status and headers in `internal/wire`'s format, and
 `encoding/json` decoding PHP's response metadata, after PHP had normalised
 the headers and `json_encode()`d them.
 
-**Effect** (`bench/ab.sh`, build d3bacd0 against 0b8bb7e):
+**Effect** (`ab.sh`, build d3bacd0 against 0b8bb7e):
 
 | Case | Before | After | Change |
 |---|---:|---:|---:|
@@ -298,7 +298,7 @@ machine's noise; kept because it is less work per call and less code path.
 
 ### Step 5 together
 
-`bench/ab.sh`, 80ed102 against 5a-5c, 7 rounds, median:
+`ab.sh`, 80ed102 against 5a-5c, 7 rounds, median:
 
 | Case | Before | After | Change |
 |---|---:|---:|---:|
@@ -396,7 +396,7 @@ At 4 connections p50 went from 52.9 to 50.5 ms (sequential) and from 26.2 to
 
 ### Step 6 together
 
-`bench/ab.sh`, 5 rounds, the build before step 6 against 6a + 6b: hello
+`ab.sh`, 5 rounds, the build before step 6 against 6a + 6b: hello
 -0.4 %, PDO MySQL +0.2 %, curl -0.5 %, `Cairo\Sql` MySQL +0.2 % (all noise:
 these cases run many fibers per thread and keep their curl handles), PDO
 PostgreSQL +7.8 % (not touched by either change; noise).
@@ -421,12 +421,12 @@ map lookup and a list move, and the cached cases below run at 80-96k req/s.
 **Effect on uncached routes.** The route handler was split into
 `newEvent`, `callPHP` and `write`; `callPHP` returns its response by value so
 the uncached path allocates what it did before (13 allocations,
-`BenchmarkUncachedRoute`). `bench/ab.sh`, 5 rounds in each order, the build
+`BenchmarkUncachedRoute`). `ab.sh`, 5 rounds in each order, the build
 before against this one: hello -0.1 % and +2.1 %, json +1.1 % and +4.9 %
 (noise). An earlier draft that allocated the response and a closure per
 request measured -6.5 to -8.9 % on hello and was changed.
 
-**Effect on cached routes.** `bench/run.sh cairo`, 3 runs of 10 s:
+**Effect on cached routes.** `run.sh cairo`, 3 runs of 10 s:
 
 | Case | Without cache | With `->cache()` | Change |
 |---|---:|---:|---:|

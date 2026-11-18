@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Runs the benchmarks in bench/README.md and writes results/raw.csv.
+# Runs the benchmarks in README.md and writes results/raw.csv.
 #
-#   bench/run.sh                     # every server
-#   bench/run.sh cairo fpm           # some of them
+#   ./run.sh                     # every server
+#   ./run.sh cairo fpm           # some of them
 #
-# Needs: docker, wrk, ghz, go, curl, and the cairo-pg / cairo-mysql
-# containers from AGENTS.md. CAIRO_BIN points at the binary under test.
+# Needs: docker, wrk, ghz, go, curl, the cairo-pg / cairo-mysql containers
+# from Cairo's AGENTS.md, and a checkout of cairophp/cairo: CAIRO_REPO, by
+# default ../cairo. CAIRO_BIN points at the binary under test.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-repo=$(cd "$here/.." && pwd)
+repo=$(cd "${CAIRO_REPO:-$here/../cairo}" && pwd)
+export CAIRO_REPO=$repo
 
 CAIRO_BIN=${CAIRO_BIN:-$repo/dist/cairo}
 WRK=${WRK:-wrk}
@@ -88,7 +90,7 @@ build_images() {
 }
 
 start_upstream() {
-    go build -o "$OUT/upstream" "$here/upstream"
+    go build -C "$here" -o "$OUT/upstream" ./upstream
     taskset -c "$UPSTREAM_CPUS" "$OUT/upstream" -addr :9100 > "$OUT/logs/upstream.log" 2>&1 &
     upstream_pid=$!
 }

@@ -1,20 +1,25 @@
-# Benchmarks
+# Cairo benchmarks
 
-Cairo against the other ways to serve PHP: nginx + PHP-FPM, FrankenPHP in
+[Cairo](https://github.com/cairophp/cairo) against the other ways to serve PHP: nginx + PHP-FPM, FrankenPHP in
 worker mode, RoadRunner and Swoole, with plain Go net/http as a ceiling. Every
 server runs the same PHP (`apps/workload.php`) on PHP 8.5.12 with opcache on and
 JIT off; only the way each one runs it differs.
 
+This repository sits next to a checkout of
+[cairophp/cairo](https://github.com/cairophp/cairo) (`../cairo`, or set
+`CAIRO_REPO`): the binary under test is built there, and the gRPC cases use
+its greeter example.
+
 ```sh
-make static                                   # dist/cairo
-PATH=/path/to/wrk-and-ghz:$PATH bench/run.sh  # or: bench/run.sh cairo swoole
-WORKERS=64 CASES="sleep curl" bench/run.sh fpm frankenphp roadrunner   # other settings
-bench/ab.sh old/cairo new/cairo                # two Cairo builds, alternating
+make -C ../cairo static                   # ../cairo/dist/cairo
+PATH=/path/to/wrk-and-ghz:$PATH ./run.sh  # or: ./run.sh cairo swoole
+WORKERS=64 CASES="sleep curl" ./run.sh fpm frankenphp roadrunner   # other settings
+./ab.sh old/cairo new/cairo               # two Cairo builds, alternating
 ```
 
 `run.sh` needs Docker, `wrk`, `ghz`, Go, and the `cairo-pg` / `cairo-mysql`
-containers from AGENTS.md. It seeds a 1000-row `bench_items` table in both,
-builds the competitor images (`apps/*/Dockerfile`), and writes
+containers from Cairo's AGENTS.md. It seeds a 1000-row `bench_items` table in
+both, builds the competitor images (`apps/*/Dockerfile`), and writes
 `results/raw.csv` (every run) and `results/results.md` (medians).
 
 [IMPROVEMENTS.md](IMPROVEMENTS.md) lists each performance change made from

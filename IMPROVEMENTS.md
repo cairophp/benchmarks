@@ -481,12 +481,30 @@ when a connection comes back. (2) `PDO::inTransaction()` on Cairo's pgsql
 driver called Go and decoded JSON each time. Every reply now carries the
 transaction status and the driver keeps it.
 
-**Not settled.** The last row was measured while other work loaded the
-machine (load average above 25; hello, which does not touch the pool, moved
-by 10 % in the same run), so it only shows no difference beyond that noise.
-Measure again on a quiet host before this is pushed. The cost of
-`acquireTimeout` itself (the first row is its upper bound) also needs its
-own run.
+**Settled on a quiet host** (cloud VM, 4 vCPU, 2026-11-18; native PHP
+8.5.12 ZTS builds of v0.2.0 and of this branch; MariaDB 11.4 and
+PostgreSQL 16 on the same VM). `ab.sh` favours whichever binary runs first
+in a round, so every comparison ran in both orders, and a control ran the
+same binary against itself:
+
+| Run | PDO MySQL point query | PDO PostgreSQL point query |
+|---|---:|---:|
+| Control: this branch against itself, 10 rounds | -2.1 % | -2.9 % |
+| 6 rounds, both orders | +0.2 %, +2.2 % | -6.6 %, +8.8 % |
+| 10 rounds, both orders | -3.6 %, +4.8 % | -7.0 %, -1.0 % |
+| 10 rounds, both orders, databases pinned to their own CPU | -1.1 %, -2.3 % | +8.1 %, -4.6 % |
+
+Averaged over both orders that is +0.8 %, +0.5 % and -1.7 % on MySQL and
++0.8 %, -4.0 % and +1.6 % on PostgreSQL: no change beyond the 2 to 3 % the
+control shows. The slow-query cases moved by less than 1 % and hello, which
+does not touch the pool, by -0.5 %.
+
+**What `acquireTimeout` costs.** The same branch with `acquireTimeout: 5`
+on both pools, against none, in both orders: MySQL point query -7.6 % and
+-6.4 %, PostgreSQL -8.4 % and -3.9 %, the slow cases -0.7 % to -1.4 %. At 64
+connections on 40 database connections most requests wait once, and with a
+timeout that wait parks through Go. It is off by default, and the docs say
+it costs a little on a pool that is always full.
 
 ## Tried and not kept
 

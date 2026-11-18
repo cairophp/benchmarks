@@ -457,6 +457,55 @@ the same result.
 reads one atomic per tag. `ab.sh`, 5 rounds, step 7 against this build:
 hello +3.9 %, json +2.6 %, cpu-cached +0.7 % (83,503 and 84,106): all noise.
 
+## 8. Connection pools done well (idea 3, pooling only)
+
+Not a speed-up: `Cairo\Pool` gets a bounded wait (`acquireTimeout`), a reset
+before a connection is reused (a PDO transaction left open is rolled back),
+and `maxLifetime` / `maxIdleTime`. The work here was keeping the point-query
+cases, where every request goes through the pool, from getting slower.
+
+| Version | PDO MySQL point query | PDO PostgreSQL point query |
+|---|---:|---:|
+| Every waiter parks through Go, and the reset asks `inTransaction()` | -14.9 % | -12.6 % |
+| Waiters wait in PHP unless `acquireTimeout` is set | -9.4 %, -2.8 % | -6.0 %, -6.4 % |
+| The same, and pdo_pgsql keeps the transaction status from each reply | -3.1 %, -2.7 %, +1.5 %, +3.7 % | -2.1 %, +14.6 %, -2.5 %, -5.2 % |
+
+`ab.sh`, 4 to 6 rounds, v0.2.0 against each version; several figures are
+runs in both orders.
+
+**Why.** (1) Waiting for a connection through a Go "park" costs two thread
+crossings, and at 64 connections on 40 database connections most requests
+wait once. The pool now waits in PHP alone, as before, unless
+`acquireTimeout` asks for a timer; a request past its deadline is skipped
+when a connection comes back. (2) `PDO::inTransaction()` on Cairo's pgsql
+driver called Go and decoded JSON each time. Every reply now carries the
+transaction status and the driver keeps it.
+
+**Settled on a quiet host** (cloud VM, 4 vCPU, 2026-11-18; native PHP
+8.5.12 ZTS builds of v0.2.0 and of this branch; MariaDB 11.4 and
+PostgreSQL 16 on the same VM). `ab.sh` favours whichever binary runs first
+in a round, so every comparison ran in both orders, and a control ran the
+same binary against itself:
+
+| Run | PDO MySQL point query | PDO PostgreSQL point query |
+|---|---:|---:|
+| Control: this branch against itself, 10 rounds | -2.1 % | -2.9 % |
+| 6 rounds, both orders | +0.2 %, +2.2 % | -6.6 %, +8.8 % |
+| 10 rounds, both orders | -3.6 %, +4.8 % | -7.0 %, -1.0 % |
+| 10 rounds, both orders, databases pinned to their own CPU | -1.1 %, -2.3 % | +8.1 %, -4.6 % |
+
+Averaged over both orders that is +0.8 %, +0.5 % and -1.7 % on MySQL and
++0.8 %, -4.0 % and +1.6 % on PostgreSQL: no change beyond the 2 to 3 % the
+control shows. The slow-query cases moved by less than 1 % and hello, which
+does not touch the pool, by -0.5 %.
+
+**What `acquireTimeout` costs.** The same branch with `acquireTimeout: 5`
+on both pools, against none, in both orders: MySQL point query -7.6 % and
+-6.4 %, PostgreSQL -8.4 % and -3.9 %, the slow cases -0.7 % to -1.4 %. At 64
+connections on 40 database connections most requests wait once, and with a
+timeout that wait parks through Go. It is off by default, and the docs say
+it costs a little on a pool that is always full.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

@@ -457,6 +457,37 @@ the same result.
 reads one atomic per tag. `ab.sh`, 5 rounds, step 7 against this build:
 hello +3.9 %, json +2.6 %, cpu-cached +0.7 % (83,503 and 84,106): all noise.
 
+## 8. Connection pools done well (idea 3, pooling only)
+
+Not a speed-up: `Cairo\Pool` gets a bounded wait (`acquireTimeout`), a reset
+before a connection is reused (a PDO transaction left open is rolled back),
+and `maxLifetime` / `maxIdleTime`. The work here was keeping the point-query
+cases, where every request goes through the pool, from getting slower.
+
+| Version | PDO MySQL point query | PDO PostgreSQL point query |
+|---|---:|---:|
+| Every waiter parks through Go, and the reset asks `inTransaction()` | -14.9 % | -12.6 % |
+| Waiters wait in PHP unless `acquireTimeout` is set | -9.4 %, -2.8 % | -6.0 %, -6.4 % |
+| The same, and pdo_pgsql keeps the transaction status from each reply | -3.1 %, -2.7 %, +1.5 %, +3.7 % | -2.1 %, +14.6 %, -2.5 %, -5.2 % |
+
+`ab.sh`, 4 to 6 rounds, v0.2.0 against each version; several figures are
+runs in both orders.
+
+**Why.** (1) Waiting for a connection through a Go "park" costs two thread
+crossings, and at 64 connections on 40 database connections most requests
+wait once. The pool now waits in PHP alone, as before, unless
+`acquireTimeout` asks for a timer; a request past its deadline is skipped
+when a connection comes back. (2) `PDO::inTransaction()` on Cairo's pgsql
+driver called Go and decoded JSON each time. Every reply now carries the
+transaction status and the driver keeps it.
+
+**Not settled.** The last row was measured while other work loaded the
+machine (load average above 25; hello, which does not touch the pool, moved
+by 10 % in the same run), so it only shows no difference beyond that noise.
+Measure again on a quiet host before this is pushed. The cost of
+`acquireTimeout` itself (the first row is its upper bound) also needs its
+own run.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

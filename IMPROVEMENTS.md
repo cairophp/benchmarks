@@ -439,6 +439,24 @@ uncached hello (no PHP at all) and below plain Go net/http (99k on hello).
 In the MySQL case one background request rebuilds the entry about once a
 second (the TTL); every other request gets the cached or stale copy.
 
+### 7b. Purge by tag, and HEAD from the cache
+
+`->cache(tags: [...])` and `Cairo\Cache::purge('tag')`: each tag has a
+generation counter, an entry remembers the sum of its route's generations,
+and a lookup treats an entry from an older generation as gone. HEAD reads
+what a GET stored and never fills the cache.
+
+**Options.** (1) A generation per tag, chosen: a purge is one atomic add per
+tag, whatever the cache holds, and stale entries leave on their next lookup
+or through the LRU. (2) Walking the cache on purge and deleting tagged
+entries: holds the cache lock for up to ~250k entries while hits wait. (3)
+An index from tag to entries: more memory and bookkeeping on every store for
+the same result.
+
+**Effect.** A hit on an untagged route does no extra work; a tagged route
+reads one atomic per tag. `ab.sh`, 5 rounds, step 7 against this build:
+hello +3.9 %, json +2.6 %, cpu-cached +0.7 % (83,503 and 84,106): all noise.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

@@ -85,6 +85,14 @@ $app->offloadThreads(1);
 if (($slow = (float) bench_env('BENCH_SLOW_REQUESTS', '0')) > 0) {
     $app->slowRequests($slow);
 }
+// BENCH_HEAVY_ROUTES=10 measures the cost of the heavy-route warning (no route runs that long).
+if (($heavy = (float) bench_env('BENCH_HEAVY_ROUTES', '0')) > 0) {
+    $app->heavyRoutes($heavy);
+}
+// BENCH_REPEATED_QUERIES=1000 measures the cost of the repeated query detector (no route repeats a query that often).
+if (($times = (int) bench_env('BENCH_REPEATED_QUERIES', '0')) > 0) {
+    $app->repeatedQueries($times);
+}
 
 $text = static fn (string $body): Response => Response::text($body);
 $json = static fn (string $body): Response => new Response(200, ['Content-Type' => 'application/json'], $body);

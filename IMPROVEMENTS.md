@@ -598,6 +598,70 @@ request reaches, so the cost is measured without any logging.
 (The second number of each pair is the reverse run, sign flipped so both
 read old → new.) All within noise.
 
+## 13. What the repeated query detector costs (`$app->repeatedQueries()`)
+
+Not a speed-up: a check that the N+1 detector is cheap enough to leave on.
+With it on, PDO and `Cairo\Sql` report every statement to PHP, which works
+out its shape (literals replaced by `?`) and counts it for the request.
+`BENCH_REPEATED_QUERIES=1000` turns it on with a threshold no route
+reaches, so nothing is logged.
+
+`ab.sh`, both orders (old → new; an A/A control shows 5 to 7 % today):
+
+| Comparison | Rounds | hello | pgsql | mysql |
+|---|---:|---:|---:|---:|
+| main → detector built in, off | 5 | -1.1 %, +0.8 % | -0.4 %, +1.4 % | -0.4 %, +2.9 % |
+| off → on, first version | 5 | -1.0 %, +0.1 % | -4.9 %, -5.5 % | +2.8 %, -0.5 % |
+| off → on, first version | 9 | | -3.2 %, -7.8 % | |
+| off → on, shapes remembered | 9 | | +1.0 %, -0.2 % | |
+
+The first version was about 5 % slower on pgsql in all four runs. Most of
+that was four `preg_replace` patterns per statement (0.8 µs each time in a
+microbenchmark). A statement usually runs many times, so each thread now
+remembers the shapes of 512 statements of up to 1 KB, and a lookup costs
+0.01 µs. With that cache the cost is within noise.
+
+## 14. What the heavy-route warning costs (`$app->heavyRoutes()`)
+
+Not a speed-up: a check that the warning costs nothing. It reuses the slow
+log's timing (step 12): with it on, Go times each request's waits, and when
+the request ends it reads the longest stretch of PHP and warns about the
+route past the threshold. `BENCH_HEAVY_ROUTES=10` turns it on with a
+threshold no route reaches, so nothing is logged.
+
+`ab.sh`, 5 rounds, both orders (an A/A control shows 5 to 7 % today):
+
+| Comparison | hello | pgsql |
+|---|---:|---:|
+| main → warning built in, off | -2.1 %, +1.4 % | -2.6 %, -3.1 % |
+| off → on | -0.6 %, -0.9 % | -3.9 %, +0.2 % |
+
+(The second number of each pair is the reverse run, sign flipped so both
+read old → new.) All within noise.
+
+## 15. What request-local statics cost (`Cairo\RequestLocal`)
+
+Not a speed-up: a check that the swap of registered statics (idea 1, step 1)
+costs plain apps nothing and Laravel-sized lists little.
+
+- **Plain apps, nothing registered.** Each fiber start and request end now
+  calls into C, and every fiber switch runs one more observer, which returns
+  after one comparison. `ab.sh`, pgsql, 7 rounds, PostgreSQL and MariaDB
+  pinned to CPU 3:
+
+  | Comparison | pgsql |
+  |---|---:|
+  | main → main (A/A) | -0.4 % |
+  | main → this | +3.5 %, +0.8 %, +0.1 % |
+
+  (The middle number is the reverse run, sign flipped.) Within noise. A
+  first run without the databases pinned showed -9 % and -5.6 %, and an
+  A/A run would have shown the same: the databases shared CPUs with the
+  load generator.
+- **The swap itself.** A route ping-pongs two fibers of two different
+  requests, 1,000,000 rounds, 7 runs, pinned to one CPU. The median fiber
+  switch went from about 60 ns with nothing registered to about 75 ns with
+  three statics: about 5 ns per static, far under the 1 µs budget.
 ## 16. Isolated mode: one FIFO queue for free threads
 
 **Problem.** In isolated mode each thread runs one request at a time, but

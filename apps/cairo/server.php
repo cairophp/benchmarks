@@ -81,6 +81,10 @@ $client = new Client(['timeout' => 10]);
 $app = new App();
 $app->threads($threads);
 $app->offloadThreads(1);
+// BENCH_SLOW_REQUESTS=10 measures the cost of the slow request log (nothing is that slow).
+if (($slow = (float) bench_env('BENCH_SLOW_REQUESTS', '0')) > 0) {
+    $app->slowRequests($slow);
+}
 
 $text = static fn (string $body): Response => Response::text($body);
 $json = static fn (string $body): Response => new Response(200, ['Content-Type' => 'application/json'], $body);

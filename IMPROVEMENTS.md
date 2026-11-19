@@ -565,6 +565,7 @@ within noise.
 | Pooled request buffers, and response headers written straight into the `ResponseWriter` | No difference in alternating runs (48-61k either way) | not kept |
 | Fewer closures and `Context::current()` lookups per request in runtime.php | No difference (hello -0.8 %, json +2.8 %, 6 rounds): PHP is 16 % of hello's CPU on the cloud VM, and this was a small part of it | not kept |
 | `Cairo\Pool` `processMax`: one connection limit for all threads (PDO MySQL and PostgreSQL) | First version -29 % on `/mysql-slow` under mixed load (moving a slot closed a connection on one thread and opened one on another, all the time). Reworked so only a thread above its fair share gives connections up: ties with per-thread pools (+1 %, 0 %, +1 %, -1 %). Per-thread pools with `max` = limit / threads already give the same cap | not kept |
+| Merging identical upstream GETs in flight at once (`Cairo\Http\Client` option `coalesce`) | Upstream calls 89k → 355 under load, but only +1 % req/s and p99 -6 %. Dropped on 2026-11-19: only `Cairo\Http\Client` gets it (Guzzle and Laravel's `Http::` use curl), one request's call silently answering another can confuse, and the response cache already covers hot endpoints | `http-coalesce` (cairo#13, closed) |
 | opcache's tracing JIT for the Laravel benchmark (`opcache.jit=tracing`, 128 MB buffer) | No difference in two alternating runs (373-383 and 360-369 without, 343-368 and 362-372 with): framework code is calls and hash lookups, which the JIT does not speed up | not kept |
 
 ## Where the time goes now

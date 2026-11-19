@@ -662,6 +662,36 @@ costs plain apps nothing and Laravel-sized lists little.
   requests, 1,000,000 rounds, 7 runs, pinned to one CPU. The median fiber
   switch went from about 60 ns with nothing registered to about 75 ns with
   three statics: about 5 ns per static, far under the 1 µs budget.
+## 16. Isolated mode: one FIFO queue for free threads
+
+**Problem.** In isolated mode each thread runs one request at a time, but
+dispatch sent every request to a thread at once (the least busy one), where
+it waited in that thread's queue. A request that landed behind a slow one
+waited for it even when another thread was free. Laravel through Octane at
+256 connections had p99 1.8 to 3.5 s on Cairo, against 0.6 s on FrankenPHP,
+which keeps one queue and hands a request only to a free thread.
+
+**Change.** In isolated mode requests wait in Go, on a channel of free
+thread slots (Go hands values to waiting receivers in order, so the queue is
+first in, first out), and a thread gets its next request once it has
+answered. Fiber mode is unchanged.
+
+**Effect.** Laravel 13 + Octane on Cairo, 40 threads on 2 vCPUs, wrk on 1,
+MariaDB and the upstream on 1; 3 × 10 s per case, two rounds in opposite
+orders (medians):
+
+| Case | main | FIFO |
+|---|---|---|
+| dashboard, 256 conn | 466 req/s, p99 1.8-2.1 s (max 6.3 s) | 498 req/s (+7 %), p99 0.59 s (max 0.74 s) |
+| dashboard with `Octane::concurrently`, 256 conn | 467 req/s, p99 2.1 s | 471 req/s, p99 0.67 s |
+| dashboard, 16 conn | 322 req/s | 315 req/s (-2 %, within noise) |
+| hello, 64 conn | 2,040 req/s | 1,880 req/s (-8 %) |
+
+Hello loses 8 %: with nothing queued, a thread waits while its answer goes
+back through Go and the next request comes in. Letting each thread hold one
+more request gave that back (2,118 req/s) but put that request behind a slow
+one again (a test with one 2 s request and six of 50 ms on two threads: the
+slowest short one took 1.95 s instead of 0.3 s), so it was not kept.
 
 ## Tried and not kept
 
@@ -675,6 +705,7 @@ costs plain apps nothing and Laravel-sized lists little.
 | Fewer closures and `Context::current()` lookups per request in runtime.php | No difference (hello -0.8 %, json +2.8 %, 6 rounds): PHP is 16 % of hello's CPU on the cloud VM, and this was a small part of it | not kept |
 | `Cairo\Pool` `processMax`: one connection limit for all threads (PDO MySQL and PostgreSQL) | First version -29 % on `/mysql-slow` under mixed load (moving a slot closed a connection on one thread and opened one on another, all the time). Reworked so only a thread above its fair share gives connections up: ties with per-thread pools (+1 %, 0 %, +1 %, -1 %). Per-thread pools with `max` = limit / threads already give the same cap | not kept |
 | Merging identical upstream GETs in flight at once (`Cairo\Http\Client` option `coalesce`) | Upstream calls 89k → 355 under load, but only +1 % req/s and p99 -6 %. Dropped on 2026-11-19: only `Cairo\Http\Client` gets it (Guzzle and Laravel's `Http::` use curl), one request's call silently answering another can confuse, and the response cache already covers hot endpoints | `http-coalesce` (cairo#13, closed) |
+| Isolated mode: each thread holds its running request and one more | Hello back to main (2,118 req/s) with the same p99, but the extra request waits behind a slow one | not kept (step 16) |
 | opcache's tracing JIT for the Laravel benchmark (`opcache.jit=tracing`, 128 MB buffer) | No difference in two alternating runs (373-383 and 360-369 without, 343-368 and 362-372 with): framework code is calls and hash lookups, which the JIT does not speed up | not kept |
 
 ## Where the time goes now

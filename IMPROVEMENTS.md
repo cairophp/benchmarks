@@ -506,6 +506,28 @@ connections on 40 database connections most requests wait once, and with a
 timeout that wait parks through Go. It is off by default, and the docs say
 it costs a little on a pool that is always full.
 
+## 10. `Cairo\Sql` hardening: no transaction left on a shared connection
+
+A correctness fix with a cost check, not a speed-up. A plain `BEGIN` on a
+`Cairo\Sql` pool left its transaction on the connection, and the next request
+to get it, on any thread, ran inside it (seen on PostgreSQL and MariaDB).
+Now `BEGIN`, `START TRANSACTION`, `SET autocommit`, `LOCK` and `XA` on the
+pool are refused, a PostgreSQL connection that still comes back in a
+transaction is closed, and `acquire_timeout` bounds the wait for a
+connection (off by default).
+
+**Cost.** The statement check takes 28 ns and allocates nothing
+(`go test -bench`), against about 50 µs per request. `ab.sh`, 9 rounds,
+both orders, against v0.3.0:
+
+| Case | base first | new first | A/A control |
+|---|---:|---:|---:|
+| `sql-pgsql` | -3.4 % | -2.2 % | -5.5 % |
+| `sql-mysql` | +2.7 % | +2.1 % | -7.4 % |
+
+The A/A control on the same VM moved 5 to 7 % that day, so both cases are
+within noise.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

@@ -506,6 +506,32 @@ connections on 40 database connections most requests wait once, and with a
 timeout that wait parks through Go. It is off by default, and the docs say
 it costs a little on a pool that is always full.
 
+## 9. One PostgreSQL pool for all threads (`cairo_pool=N` in a pgsql DSN)
+
+PDO objects made with `cairo_pool=N` in their DSN share N server connections
+held in Go, across all PHP threads. Each one borrows a connection for the
+request that uses it. Before this, each thread's `Cairo\Pool` owned its own
+connections, so a busy thread could wait while another thread had idle ones.
+
+**Mixed load** (4 threads, 256 connections on `/sleep`, which uses no
+database, at the same time as 64 on `/pgsql-slow`; 3 rounds, cloud VM):
+
+| Database connections | Setup | `/pgsql-slow` req/s | p99 |
+|---|---|---:|---:|
+| 8 | Per-thread pools, `max: 2` | 723 | 223 ms |
+| 8 | `cairo_pool=8` | 743 (+3 %) | 107 ms (-52 %) |
+| 40 | Per-thread pools, `max: 10` | 3,430 | 44 ms |
+| 40 | `cairo_pool=40` | 3,649 (+6 %) | 31 ms (-30 %) |
+
+**Even load** (`ab.sh`, the `pgsql` point-query case, both orders): -2.4 %,
+within the 2 to 3 % an A/A control shows. That is the cost of borrowing and
+returning a connection in Go once per request. `pgsql-slow`: +0.2 %.
+
+**Why.** Cairo sends each request to the least busy thread by requests in
+flight, not by database use, so the requests that need a connection are
+spread unevenly at any moment. With one pool, a waiting request gets
+whichever connection is free first, on any thread.
+
 ## 10. `Cairo\Sql` hardening: no transaction left on a shared connection
 
 A correctness fix with a cost check, not a speed-up. A plain `BEGIN` on a
@@ -538,6 +564,7 @@ within noise.
 | msgpack instead of the binary format | Not built: slower to decode in PHP without an extension | – |
 | Pooled request buffers, and response headers written straight into the `ResponseWriter` | No difference in alternating runs (48-61k either way) | not kept |
 | Fewer closures and `Context::current()` lookups per request in runtime.php | No difference (hello -0.8 %, json +2.8 %, 6 rounds): PHP is 16 % of hello's CPU on the cloud VM, and this was a small part of it | not kept |
+| `Cairo\Pool` `processMax`: one connection limit for all threads (PDO MySQL and PostgreSQL) | First version -29 % on `/mysql-slow` under mixed load (moving a slot closed a connection on one thread and opened one on another, all the time). Reworked so only a thread above its fair share gives connections up: ties with per-thread pools (+1 %, 0 %, +1 %, -1 %). Per-thread pools with `max` = limit / threads already give the same cap | not kept |
 | opcache's tracing JIT for the Laravel benchmark (`opcache.jit=tracing`, 128 MB buffer) | No difference in two alternating runs (373-383 and 360-369 without, 343-368 and 362-372 with): framework code is calls and hash lookups, which the JIT does not speed up | not kept |
 
 ## Where the time goes now

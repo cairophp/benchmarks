@@ -598,6 +598,29 @@ request reaches, so the cost is measured without any logging.
 (The second number of each pair is the reverse run, sign flipped so both
 read old → new.) All within noise.
 
+## 13. What the repeated query detector costs (`$app->repeatedQueries()`)
+
+Not a speed-up: a check that the N+1 detector is cheap enough to leave on.
+With it on, PDO and `Cairo\Sql` report every statement to PHP, which works
+out its shape (literals replaced by `?`) and counts it for the request.
+`BENCH_REPEATED_QUERIES=1000` turns it on with a threshold no route
+reaches, so nothing is logged.
+
+`ab.sh`, both orders (old → new; an A/A control shows 5 to 7 % today):
+
+| Comparison | Rounds | hello | pgsql | mysql |
+|---|---:|---:|---:|---:|
+| main → detector built in, off | 5 | -1.1 %, +0.8 % | -0.4 %, +1.4 % | -0.4 %, +2.9 % |
+| off → on, first version | 5 | -1.0 %, +0.1 % | -4.9 %, -5.5 % | +2.8 %, -0.5 % |
+| off → on, first version | 9 | | -3.2 %, -7.8 % | |
+| off → on, shapes remembered | 9 | | +1.0 %, -0.2 % | |
+
+The first version was about 5 % slower on pgsql in all four runs. Most of
+that was four `preg_replace` patterns per statement (0.8 µs each time in a
+microbenchmark). A statement usually runs many times, so each thread now
+remembers the shapes of 512 statements of up to 1 KB, and a lookup costs
+0.01 µs. With that cache the cost is within noise.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

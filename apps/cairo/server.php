@@ -81,6 +81,10 @@ $client = new Client(['timeout' => 10]);
 $app = new App();
 $app->threads($threads);
 $app->offloadThreads(1);
+// BENCH_REPEATED_QUERIES=1000 measures the cost of the repeated query detector (no route repeats a query that often).
+if (($times = (int) bench_env('BENCH_REPEATED_QUERIES', '0')) > 0) {
+    $app->repeatedQueries($times);
+}
 
 $text = static fn (string $body): Response => Response::text($body);
 $json = static fn (string $body): Response => new Response(200, ['Content-Type' => 'application/json'], $body);

@@ -554,6 +554,33 @@ both orders, against v0.3.0:
 The A/A control on the same VM moved 5 to 7 % that day, so both cases are
 within noise.
 
+## 11. Dispatch passes over a thread stuck in one fiber (idea 6, step 1)
+
+Go sent each request to the thread with the fewest requests in flight. A
+thread running one 300 ms CPU loop has one request in flight, so it looked
+idle and got new requests, which then waited for the loop. Now a thread
+whose PHP has run 5 ms without coming back for an event is passed over
+while another thread is not stuck.
+
+**Arrivals during a long run** (`TestFairDispatch`: 2 threads, a 300 ms CPU
+loop, 40 light requests from 4 clients meanwhile, 3 runs):
+
+| | median | slowest |
+|---|---:|---:|
+| before | 6 ms | 256 ms |
+| after | 6 ms | 6 to 7 ms |
+
+**Steady mixed load** (1 connection on the new `/heavy` route, 40 ms of
+CPU that never yields, plus 64 on `/sleep`; 2 threads; 4 rounds each,
+alternating): `/sleep` p99 is 94 to 110 ms before and 96 to 115 ms after,
+no change. Under steady load the heavy request starts on a thread that
+already holds about half of the sleeping light requests, and their wake-ups
+wait for it. Step 1 only helps requests that arrive while a thread is stuck.
+The fibers already parked there need time slices (step 3) or `offload()`.
+
+**Cost:** `ab.sh` hello -1.2 % and +0.9 %, json +0.4 % and -3.8 %, both
+orders: within noise. One clock read per dispatch.
+
 ## 13. What the repeated query detector costs (`$app->repeatedQueries()`)
 
 Not a speed-up: a check that the N+1 detector is cheap enough to leave on.

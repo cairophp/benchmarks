@@ -94,6 +94,8 @@ $http->get('/info', fn (): Response => Response::json(bench_info() + ['server' =
 $http->get('/hello', fn (): Response => $text(bench_hello()));
 $http->get('/json', fn (): Response => $json(bench_json()));
 $http->get('/cpu', fn (): Response => $text(bench_cpu()));
+// About 40 ms of PHP that never yields: the heavy half of the mixed fairness test.
+$http->get('/heavy', fn (): Response => $text((string) bench_fib(30)));
 // The same work behind Go's response cache: after the first request, Go
 // answers alone, or serves the stale copy while one request rebuilds it.
 $http->get('/cpu-cached', fn (): Response => $text(bench_cpu()))->cache(ttl: 60);

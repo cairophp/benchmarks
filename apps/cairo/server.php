@@ -77,6 +77,8 @@ $sqlOptions = ['max_open' => $perThread * $threads];
 $sqlPg = Db::open(bench_env('BENCH_SQL_PGSQL', "postgres://$pgUser:$pgPass@127.0.0.1:5432/cairo"), $sqlOptions);
 $sqlMy = Db::open(bench_env('BENCH_SQL_MYSQL', "mysql://$myUser:$myPass@127.0.0.1:3306/bench"), $sqlOptions);
 $client = new Client(['timeout' => 10]);
+// Identical GETs in flight at once share one upstream call.
+$coalesced = new Client(['timeout' => 10, 'coalesce' => true]);
 
 $app = new App();
 $app->threads($threads);
@@ -98,6 +100,7 @@ $http->get('/mysql-slow-cached', fn (): Response => $json($my->with(bench_slow_q
 $http->get('/sleep', fn (): Response => $text(bench_sleep()));
 $http->get('/curl', fn (): Response => $text($curl->with(bench_curl(...))));
 $http->get('/client', fn (): Response => $text($client->get(bench_upstream_url())->body));
+$http->get('/client-coalesce', fn (): Response => $text($coalesced->get(bench_upstream_url())->body));
 $http->get('/pgsql', fn (): Response => $json($pg->with(bench_query(...))));
 $http->get('/pgsql-slow', fn (): Response => $json($pg->with(bench_slow_query(...))));
 $http->get('/mysql', fn (): Response => $json($my->with(bench_query(...))));

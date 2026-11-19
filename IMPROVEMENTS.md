@@ -532,6 +532,28 @@ flight, not by database use, so the requests that need a connection are
 spread unevenly at any moment. With one pool, a waiting request gets
 whichever connection is free first, on any thread.
 
+## 11. Identical upstream GETs share one call (`coalesce` on `Cairo\Http\Client`)
+
+With `'coalesce' => true`, identical GET and HEAD requests in flight at the
+same moment, from any thread, share one upstream call. The new
+`/client-coalesce` route is `/client` with the option on, and the upstream
+now counts its calls at `/count`.
+
+**Hot URL** (4 threads, 256 connections, a 20 ms upstream, 8 s, 3 rounds,
+same binary):
+
+| Route | req/s | p99 | Upstream calls per 8 s |
+|---|---:|---:|---:|
+| `/client` | 10,983 to 11,160 | 34 to 37 ms | about 89,000 |
+| `/client-coalesce` | 11,155 to 11,219 (+1 %) | 32 to 33 ms (-6 %) | about 355 |
+
+The upstream gets 250 times fewer calls. Throughput barely moves here
+because the upstream in this benchmark is free; with a real upstream that
+has a cost or a rate limit, those 88,000 saved calls are the gain.
+
+**Off by default:** `ab.sh`, the `client` case, both orders against v0.3.0:
+-0.2 % and -0.2 %.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

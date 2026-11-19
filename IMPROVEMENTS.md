@@ -532,6 +532,23 @@ flight, not by database use, so the requests that need a connection are
 spread unevenly at any moment. With one pool, a waiting request gets
 whichever connection is free first, on any thread.
 
+## 13. What the slow request log costs (`$app->slowRequests()`)
+
+Not a speed-up: a check that the new log costs nothing. Go times every wait
+of a request (one nil check per wait when the log is off, two clock reads
+when it is on). `BENCH_SLOW_REQUESTS=10` turns it on with a threshold no
+request reaches, so the cost is measured without any logging.
+
+`ab.sh`, 5 rounds, both orders (an A/A control shows 5 to 7 % today):
+
+| Comparison | hello | pgsql |
+|---|---:|---:|
+| v0.3.0 → log built in, off | -0.7 %, +1.7 % | +6.3 %, +0.2 % |
+| off → on | +0.8 %, -1.8 % | +5.4 %, +0.8 % |
+
+(The second number of each pair is the reverse run, sign flipped so both
+read old → new.) All within noise.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

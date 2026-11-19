@@ -621,6 +621,24 @@ microbenchmark). A statement usually runs many times, so each thread now
 remembers the shapes of 512 statements of up to 1 KB, and a lookup costs
 0.01 µs. With that cache the cost is within noise.
 
+## 14. What the heavy-route warning costs (`$app->heavyRoutes()`)
+
+Not a speed-up: a check that the warning costs nothing. It reuses the slow
+log's timing (step 12): with it on, Go times each request's waits, and when
+the request ends it reads the longest stretch of PHP and warns about the
+route past the threshold. `BENCH_HEAVY_ROUTES=10` turns it on with a
+threshold no route reaches, so nothing is logged.
+
+`ab.sh`, 5 rounds, both orders (an A/A control shows 5 to 7 % today):
+
+| Comparison | hello | pgsql |
+|---|---:|---:|
+| main → warning built in, off | -2.1 %, +1.4 % | -2.6 %, -3.1 % |
+| off → on | -0.6 %, -0.9 % | -3.9 %, +0.2 % |
+
+(The second number of each pair is the reverse run, sign flipped so both
+read old → new.) All within noise.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

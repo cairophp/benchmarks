@@ -693,6 +693,48 @@ more request gave that back (2,118 req/s) but put that request behind a slow
 one again (a test with one 2 s request and six of 50 ms on two threads: the
 slowest short one took 1.95 s instead of 0.3 s), so it was not kept.
 
+## 17. Laravel in fiber mode under slow dependencies (idea 1)
+
+**Problem.** Every PHP server runs one Laravel request per worker, so when a
+dependency slows down, throughput falls to workers ÷ request time: 40
+workers and a request that waits 2 s serve 20 requests per second, with the
+CPU idle.
+
+**Change.** Idea 1, finished: `Cairo\RequestLocal` (step 15), the Octane
+driver's fiber mode (cairophp/octane, one booted app per request in flight,
+and every static an app sets while booting kept per app), and
+`App::detectLeaks()` (cairo#25) to find statics that hold request state.
+No change to the request path of plain Cairo apps.
+
+**Effect.** Laravel 13 + Octane, the dashboard (one DB query, two upstream
+calls) at 256 connections, measured in the cloud container (2 vCPUs for the
+server, not the laptop above); req/s, median of 3 × 10 s:
+
+| Upstream | FrankenPHP 40 workers | Cairo isolated 40 threads | Cairo fibers 4×10 | Cairo fibers 4×64 |
+|---|---|---|---|---|
+| 20 ms | 453 | 510 | 503 | 347 |
+| 200 ms | 94 | 95 | 93 | **334** |
+| 1,000 ms | 16 | 16 | 16 | **102** |
+| 200 ms, calls in `Octane::concurrently()` | 92 | 188 | 188 | **335** |
+| 1,000 ms, calls in `Octane::concurrently()` | 16 | 36 | 36 | **198** |
+
+Memory: FrankenPHP 290 MiB, isolated 300-330, fibers 4×10 200-210, fibers
+4×64 420-510 (256 booted apps). At 1 s the 4×64 setting serves 6.4 times
+more than 40 workers. At 20 ms the CPU is the limit and 4×64 loses 30 %
+(twice the p99) to switching between 256 apps and their GC, so
+`--concurrency` should follow how slow the app's dependencies are.
+
+Registering the 40 statics that a Laravel 13 app sets while booting (instead
+of the fixed list of 16) costs nothing measurable: hello at 64 connections,
+fibers 4×10, 1,994 and 2,127 req/s before, 1,913 and 2,133 after.
+
+## 18. What the leak detector costs (`$app->detectLeaks()`)
+
+Off by default, and then one bool check per request. On, it reads every
+static of the app's classes when each request ends: Laravel hello at 2
+threads goes from 2,018 to 521 req/s, about 3 ms of CPU per request. It is a
+development aid; keep it off in production.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

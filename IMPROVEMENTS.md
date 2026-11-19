@@ -639,6 +639,30 @@ threshold no route reaches, so nothing is logged.
 (The second number of each pair is the reverse run, sign flipped so both
 read old → new.) All within noise.
 
+## 15. What request-local statics cost (`Cairo\RequestLocal`)
+
+Not a speed-up: a check that the swap of registered statics (idea 1, step 1)
+costs plain apps nothing and Laravel-sized lists little.
+
+- **Plain apps, nothing registered.** Each fiber start and request end now
+  calls into C, and every fiber switch runs one more observer, which returns
+  after one comparison. `ab.sh`, pgsql, 7 rounds, PostgreSQL and MariaDB
+  pinned to CPU 3:
+
+  | Comparison | pgsql |
+  |---|---:|
+  | main → main (A/A) | -0.4 % |
+  | main → this | +3.5 %, +0.8 %, +0.1 % |
+
+  (The middle number is the reverse run, sign flipped.) Within noise. A
+  first run without the databases pinned showed -9 % and -5.6 %, and an
+  A/A run would have shown the same: the databases shared CPUs with the
+  load generator.
+- **The swap itself.** A route ping-pongs two fibers of two different
+  requests, 1,000,000 rounds, 7 runs, pinned to one CPU. The median fiber
+  switch went from about 60 ns with nothing registered to about 75 ns with
+  three statics: about 5 ns per static, far under the 1 µs budget.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

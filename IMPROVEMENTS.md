@@ -735,24 +735,147 @@ static of the app's classes when each request ends: Laravel hello at 2
 threads goes from 2,018 to 521 req/s, about 3 ms of CPU per request. It is a
 development aid; keep it off in production.
 
+## 19. The core engine round: waits on the PHP thread, queues to Go, the scheduler in C
+
+One pull request, [cairophp/cairo#36](https://github.com/cairophp/cairo/pull/36),
+with a commit for each step. Its description has the options that were
+compared and the tests of each; this is the record of what each step measured.
+
+Until here every fiber had a goroutine and a context in Go, every wait (a
+sleep, a channel, a socket) crossed to Go and back, and a PHP thread called
+into Go for its next event and to hand over an answer. Each of those calls
+held one of Go's processors, which Go's scheduler then took back and gave out
+again. Now a fiber is PHP alone, a wait that needs nothing of Go stays on its
+thread, Go and the threads pass requests and answers through queues that
+neither side calls the other for, and a goroutine runs only for the length of
+a Go operation.
+
+### How it was measured
+
+The cloud VM of step 5, the server on 2 CPUs with 4 PHP threads and wrk at 64
+connections on the other two. Every commit's binary ran in turn with the
+binary of the commit before it: 40 alternating rounds of 4 s for each route
+(80 or 120 where the difference was near the error), and 6 to 12 runs of the
+core operations (`coreops/`, below) on one PHP thread. A figure after "±" is
+one standard error. Three rounds, as `ab.sh` does by default, cannot see a
+change of 2% on this machine: run it with `ROUNDS=40`.
+
+`hello` here is the plain-text route, `/cpu` computes for 350 µs in PHP, and
+`/pgsql` and `/mysql` run one PDO query on a random row.
+
+### The whole series
+
+`main` before the pull request (6f35a4d) against its last commit (81eaaae):
+
+| Case | Before | After | Difference |
+|---|---:|---:|---|
+| hello, requests per second | 38,221 | **51,619** | +35.1% ± 1.6%; CPU per request 51.5 to 37.7 µs |
+| `/mysql` | 15,851 | **27,489** | +73.4% ± 2.2%; CPU per request 113.8 to 65.7 µs |
+| `/cpu` | 3,491 | **4,029** | +15.4% ± 1.6% |
+| `/pgsql` | 15,952 | 16,576 | +3.9% ± 1.6% |
+| `Cairo\sleep(0)` | 37,531 ns | **761 ns** | -98.0% |
+| A channel round trip between two fibers | 79,344 ns | **3,935 ns** | -95.0% |
+| `withTimeout()` + `cancel()` | 4,615 ns | **347 ns** | -92.5% |
+| `Channel` send + receive, nobody waits | 1,262 ns | **100 ns** | -92.1% |
+| `async()` + `await()` | 6,057 ns | **1,194 ns** | -80.3% |
+| `Context::current()` | 120 ns | **28 ns** | -76.6% |
+| `Go::callNow` (a Go operation on the PHP thread) | 2,725 ns | **931 ns** | -65.8% |
+| `offload()`, an empty job | 90,566 ns | **34,957 ns** | -61.4% |
+| `Go::call`, 64 fibers at once (per call) | 3,959 ns | **2,281 ns** | -42.4% |
+| `Go::call`, one fiber on an idle thread | 38,341 ns | 31,268 ns | -18.4% ± 1.9% |
+
+### Each step
+
+In the order they were made, which is the order of their dependencies. The
+numbers of a step are against the commit before it.
+
+| Step | What changed | What it measured |
+|---|---|---|
+| 19a (916465b) | Cairo's C code is compiled at `-O2`. The build set `CGO_CFLAGS` to PHP's include paths, which dropped the optimization Go asks for by default | `Go::call` ×64 -8.3%, `sleep(0)` ×64 -7.8%, `/pgsql` +3.6% ± 1.6%, hello +1.1% ± 1.5% |
+| 19b (1ab5d2c) | Opcache holds Cairo's own PHP files. They are written at start, and opcache leaves out a file that changed in the last two seconds, so every thread compiled the runtime itself | `Context::current()` 121 to 63 ns, `async()` + `await()` -26.6%, hello +2.5% ± 1.1% |
+| 19c (98275ea) | On glibc, a call from a fiber's stack into Go no longer makes Go fetch the thread's stack from the system (a `sched_getaffinity` call and an allocation each time) | `withTimeout()` + `cancel()` -27.4%, `async()` + `await()` -20.6%, `Go::callNow` -14.2%, hello +0.9% ± 0.9% |
+| 19d (1e08160) | The calls a thread took and its fibers are in tables of that thread, not in two maps locked by all threads | hello +3.1% ± 1.0% |
+| 19e (151bc9c) | A request's objects in Go are reused: eight allocations and 1 kB less per request | hello +2.4% ± 0.8% |
+| 19f (db3ad52) | A request's fibers wait under the server's own context, not one made for each request: five allocations less | hello +4.4% ± 0.9% |
+| 19g (b3c576d) | A request goes to a thread that is running PHP and will take it within 50 µs, when there is one, instead of waking a thread that sleeps | hello +6.1% ± 1.0%, `/pgsql` -0.2% ± 1.0% |
+| 19h (0d9d674) | The arguments of a Go operation cross in the binary format of step 3, not as JSON | `Go::callNow` 2,268 to 910 ns, `Go::call` ×64 -9.9%, hello -0.2% ± 0.8% |
+| 19i (f7ae72c, 03ddda8) | `sleep()`, channels, `select()` and `Cairo\Pool` wait on the PHP thread, which keeps the timers. Go and the thread share a mailbox, and a thread that gave Go an operation watches it for a few microseconds before it sleeps | `sleep(0)` 32,869 to 1,313 ns, channel round trip 62,518 to 5,597 ns, `Go::call` of one fiber -29.8%, hello 0.0% ± 1.3% |
+| 19j (14f5a76) | Requests and answers cross in lock-free queues. A thread sleeps and wakes in C (a futex), and one goroutine collects the answers of all threads | hello +8.0% ± 1.8% (CPU per request -9.5%), `/cpu` +9.6% ± 0.9%, `/mysql` +8.0% ± 2.2%, `/pgsql` -3.0% ± 1.4%, `Go::call` of one fiber +23.4%, `offload()` +38.9% (fixed in 19m) |
+| 19k (f4f0178) | A fiber has no goroutine and no context in Go. `async()` and the derived contexts are PHP alone, and an operation's goroutine then waits for the thread's next operation | `async()` + `await()` 3,593 to 1,421 ns, `withTimeout()` + `cancel()` 2,895 to 360 ns, hello +2.0% ± 0.8%, `/mysql` +1.8% ± 1.2% |
+| 19l (cd44990) | Socket waits (PDO MySQL, streams, curl) on an epoll of each PHP thread, where a thread with nothing to run sleeps and Go wakes it through an eventfd | `/mysql` +19.8% ± 1.7% (CPU per request 88.3 to 69.4 µs), curl CPU per request -18.0% ± 2.7%, hello -0.5% ± 0.8% |
+| 19m (a3b2e7f) | An `offload()` job goes from its request thread straight into the inbox of an offload thread and its result straight back: two wake-ups of threads, where it took four | An empty job 99,987 to 35,585 ns; a job of 50 µs costs 87 µs of CPU, where it cost 165 |
+| 19n (a3fd582) | `Channel::send()` with room and `recv()` of a buffered value no longer go through `select()` | Send + receive 1,170 to 102 ns, round trip between two fibers -22.0% |
+| 19o (81eaaae) | The scheduler's hot path in C: the context of each fiber, the idle fibers, the ready queue, and the parked waits with their timers | `sleep(0)` ×64 1,379 to 675 ns, `Context::current()` 69 to 33 ns, `/mysql` +15.8% ± 1.5% (a PDO query parks its fiber three times), hello +2.7% ± 1.0% |
+
+### What stays open
+
+- `/pgsql` lost 3.0% in 19j and is +3.9% over the whole series. A PDO pgsql
+  query is a Go operation, so each one still takes a goroutine and two
+  wake-ups; `/mysql`, which waits on its own socket, no longer does.
+- `Go::call` from one fiber on a thread with nothing else to do takes about
+  31 µs: the thread sleeps, and waking it costs most of that. From 64 fibers
+  at once it is 2.3 µs a call.
+
+### The machine, and the benchmark of the core operations
+
+The smallest operations ran at one of two speeds from run to run of the same
+binary, and a route seemed to lose 1.7% on code that had not changed. Both
+were the machine. The cloud VM runs everything 1.3 to 2.1 times slower for
+0.1 to 0.7 s at a time, at no fixed moment: a C program with no PHP and no Go,
+alone on a CPU, shows it too, and a busy neighbour CPU makes no difference.
+Code that calls and touches memory loses more in such a stretch than a bare
+loop. Where code and data sit in memory moves these operations by about 1%,
+across starts and across builds.
+
+So the core operations are measured in short pieces. `coreops/server.php`
+runs each operation in 25 pieces, in turn with the pieces of the others, and
+its fastest piece counts; five long rounds in a row could all fall inside one
+slow stretch. Six runs then agree to under 1% (`Context::current()` 60.5 ±
+0.2 against 28.0 ± 0.0 ns for 19n and 19o), where twelve runs of the old way
+left a standard error of up to 7%.
+
+```sh
+coreops/run.sh old/cairo > out/coreops-old-1.txt   # in turn, several times each
+coreops/run.sh new/cairo > out/coreops-new-1.txt
+coreops/compare.py out old new
+```
+
+For the routes, a slow stretch is shorter than a round of 4 s and hits both
+binaries alike over 40 rounds. The 1.7% went away with more rounds: 120
+rounds give -0.5% ± 0.7%, with the same CPU per request.
+
 ## Tried and not kept
 
 | Change | Result | Branch |
 |---|---|---|
 | PHP threads spin before waiting for an event | Worse (hello 21.9k → 19.2k): a spinning thread inside a Go callback holds a P that net/http needs | not kept |
 | The socket poller wakes the PHP thread directly, skipping the fiber's goroutine | No difference: that goroutine wake runs on the same P and costs no thread switch | not kept |
-| PHP threads wait for events in a C queue (inbox.c) instead of inside Go | No difference: hello 49k either way, 76-80 µs CPU and 2.1 context switches per request | `experiment-c-inbox` |
+| PHP threads wait for events in a C queue (inbox.c) instead of inside Go | No difference then: hello 49k either way, 76-80 µs CPU and 2.1 context switches per request. Done in step 19j together with the way of the answers, where it gains 8% | `experiment-c-inbox` |
 | msgpack instead of the binary format | Not built: slower to decode in PHP without an extension | – |
 | Pooled request buffers, and response headers written straight into the `ResponseWriter` | No difference in alternating runs (48-61k either way) | not kept |
 | Fewer closures and `Context::current()` lookups per request in runtime.php | No difference (hello -0.8 %, json +2.8 %, 6 rounds): PHP is 16 % of hello's CPU on the cloud VM, and this was a small part of it | not kept |
 | `Cairo\Pool` `processMax`: one connection limit for all threads (PDO MySQL and PostgreSQL) | First version -29 % on `/mysql-slow` under mixed load (moving a slot closed a connection on one thread and opened one on another, all the time). Reworked so only a thread above its fair share gives connections up: ties with per-thread pools (+1 %, 0 %, +1 %, -1 %). Per-thread pools with `max` = limit / threads already give the same cap | not kept |
 | Merging identical upstream GETs in flight at once (`Cairo\Http\Client` option `coalesce`) | Upstream calls 89k → 355 under load, but only +1 % req/s and p99 -6 %. Dropped on 2026-11-19: only `Cairo\Http\Client` gets it (Guzzle and Laravel's `Http::` use curl), one request's call silently answering another can confuse, and the response cache already covers hot endpoints | `http-coalesce` (cairo#13, closed) |
 | Isolated mode: each thread holds its running request and one more | Hello back to main (2,118 req/s) with the same p99, but the extra request waits behind a slow one | not kept (step 16) |
+| Step 19i with the thread asleep on its own eventfd instead of inside Go | The waits were as fast, but a Go operation of one fiber took 46 µs against 33. Step 19j moved the sleep to C with the queues | not kept |
+| Step 19j with the operations through the queue too | `Go::call` of one fiber 37.6 µs against 21.8; from 64 fibers 19% faster (1.95 µs). The single call decided | not kept |
+| A wait of up to 1 ms on the thread itself before parking a fiber on its socket (step 6a), next to other requests | It cost 4 to 7% on `/mysql` once a socket wait was a wait of the thread (19l). Kept only in isolated mode, where the thread has nothing else to run | removed in 19l |
+| The thread always sleeps in its epoll, also with no fiber on a socket | Not built: a wake-up there is a write and epoll's own wake-up, where the futex is one call, and routes that wait on no socket would pay it | – |
+| Request and offload threads watch their inbox for 6 µs before they sleep on an `offload()` job | An empty job takes 19 µs, but a job of 50 µs takes 88 µs either way and pays 12 µs more CPU | not kept |
+| The lists of the scheduler (step 19o) in `malloc` memory | Built first and replaced: outside `memory_limit` and `maxMemory()`, so timers left behind by waits that ended early could grow unseen | replaced in 19o |
+| Pinning the fast level of the smallest operations (code and data layout) | Nothing to pin: the two levels are the machine's slow stretches (step 19), and layout moves these operations by about 1% | – |
 | opcache's tracing JIT for the Laravel benchmark (`opcache.jit=tracing`, 128 MB buffer) | No difference in two alternating runs (373-383 and 360-369 without, 343-368 and 362-372 with): framework code is calls and hash lookups, which the JIT does not speed up | not kept |
 
 ## Where the time goes now
 
-On hello, Cairo spends about 65 µs of CPU per request with one PHP thread:
-about 17 µs in PHP (Cairo's runtime: Request, Context, the response) and
-about 48 µs in Go, of which plain net/http is about 25 µs. Swoole spends
-about 33 µs in total: its HTTP server is C on the same thread as PHP.
+On hello at 64 connections, with 4 PHP threads on the cloud VM, Cairo spends
+37.7 µs of CPU per request after step 19 (51.5 µs before it). PHP takes 5.4 µs
+of that (Cairo's runtime: Request, Context, the response) and Cairo's C 1.4
+µs, sampled with perf. The rest is Go's HTTP server and the kernel under it:
+reading the request, writing the response and waking threads. So the HTTP
+server is the next place to look, not the scheduler.
+
+Before step 19, on the laptop with one PHP thread, hello cost about 65 µs:
+about 17 µs in PHP and about 48 µs in Go, of which plain net/http is about
+25 µs. Swoole spends about 33 µs in total: its HTTP server is C on the same
+thread as PHP.

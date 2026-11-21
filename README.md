@@ -25,6 +25,11 @@ both, builds the competitor images (`apps/*/Dockerfile`), and writes
 [IMPROVEMENTS.md](IMPROVEMENTS.md) lists each performance change made from
 these benchmarks, why, and Cairo's numbers after each one.
 
+`coreops/run.sh cairo` measures what each operation of Cairo's core costs
+(a sleep, a channel hand-over, `async()`, a Go operation, `offload()`) inside
+one request on an idle server, and `coreops/compare.py` compares the runs of
+two binaries.
+
 ## Cases
 
 | Case | What one request does | wrk connections |

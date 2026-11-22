@@ -24,8 +24,8 @@ SERVER_CPUS=${SERVER_CPUS:-0,1,4,5}
 LOAD_CPUS=${LOAD_CPUS:-2,3,6}
 UPSTREAM_CPUS=${UPSTREAM_CPUS:-7}
 
-declare -A conns=([hello]=64 [json]=64 [cpu]=64 [sleep]=256 [curl]=256 [client]=256 [pgsql]=64
-    [pgsql-slow]=256 [sql-pgsql]=64 [mysql]=64 [mysql-slow]=256 [sql-mysql]=64 [cpu-cached]=64 [mysql-slow-cached]=256)
+declare -A conns=([hello]=64 [json]=64 [cpu]=64 [sleep]=256 [curl]=256 [pgsql]=64
+    [pgsql-slow]=256 [mysql]=64 [mysql-slow]=256 [cpu-cached]=64 [mysql-slow-cached]=256)
 
 work=$(mktemp -d)
 trap 'kill ${server_pid:-} ${upstream_pid:-} 2> /dev/null || true; rm -rf "$work"' EXIT

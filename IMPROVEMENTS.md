@@ -844,6 +844,47 @@ For the routes, a slow stretch is shorter than a round of 4 s and hits both
 binaries alike over 40 rounds. The 1.7% went away with more rounds: 120
 rounds give -0.5% ± 0.7%, with the same CPU per request.
 
+## 20. Five features removed (no speed change)
+
+[cairophp/cairo#38](https://github.com/cairophp/cairo/pull/38) removes
+`Cairo\Sql`, `Cairo\Http\Client`, the Revolt driver, the repeated query
+detector (`$app->repeatedQueries()`) and the `cors()`, `rateLimit()` and
+`gzip()` middleware. It is not a performance change: the reason is a smaller
+set of extensions (4,582 lines less, and the Go MySQL driver with it). It is
+here because this suite changed with it and because a removal is also
+measured.
+
+What changed in this suite: `apps/cairo/server.php` lost the routes
+`/client`, `/sql-pgsql` and `/sql-mysql` and the `BENCH_REPEATED_QUERIES`
+switch, and `run.sh` and `ab.sh` lost the three cases. The rows of
+`Cairo\Http\Client` and `Cairo\Sql` in the tables above and in the README
+are the record of their dates; a current Cairo cannot run them. Steps 1f,
+2a, 10 and 13 are about `Cairo\Sql` and the detector and stay as history.
+
+What it measured, as in step 19 (the cloud VM, the server on 2 CPUs with 4
+PHP threads, wrk at 64 connections, 40 alternating rounds of 4 s), `main`
+before it (1876d8f) against its last commit (3332ac7):
+
+| Case | Before | After | Difference |
+|---|---:|---:|---|
+| hello | 50,832 | 50,016 | -0.9% ± 1.9%; CPU per request 38.8 to 39.4 µs |
+| `/pgsql` | 18,033 | 17,630 | -1.8% ± 1.5%; CPU per request 104.0 to 106.0 µs |
+| `/mysql`, first 40 rounds | 27,705 | 26,468 | -4.0% ± 1.4%; CPU per request 67.0 to 69.2 µs |
+| `/mysql`, second 40 rounds | 27,639 | 27,452 | -0.3% ± 1.6%; CPU per request 66.7 to 67.3 µs |
+| `/mysql`, all 80 rounds | | | -2.1% ± 1.1% |
+| The binary of a native build | 29.35 MB | **23.22 MB** | -20.9% |
+
+The first MySQL run stood out for a change that only removes code, so it was
+checked. Profiles of both builds show no function that got slower: the
+difference of the slow run is spread over the kernel, `libphp.so` (the same
+file for both builds) and the binary, as in a slow stretch of the machine
+(step 19, "The machine, and the benchmark of the core operations"). Per
+request both builds make the same system calls (15.2 and 15.6) and thread
+switches (0.67 and 0.61), the core operations of `coreops/` are within 3% in
+both directions, and a second 40 rounds gave -0.3%. Reading: no change that this machine can measure. The
+three routes lean one to two percent low, none by more than two standard
+errors, and nothing points at a cause in the code.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

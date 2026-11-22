@@ -40,11 +40,9 @@ two binaries.
 | cpu-cached | the same behind `->cache(ttl: 60)` (Cairo only) | 64 |
 | sleep | `usleep(20000)` | 256 |
 | curl | curl GET to a Go upstream that answers after 20 ms | 256 |
-| client | the same through `Cairo\Http\Client` (Cairo only) | 256 |
 | pgsql, mysql | PDO prepared `SELECT ... WHERE id = ?` on a random row | 64 |
 | pgsql-slow, mysql-slow | PDO query that takes 10 ms in the database | 256 |
 | mysql-slow-cached | mysql-slow behind `->cache(ttl: 1, staleWhileRevalidate: 10)` (Cairo only) | 256 |
-| sql-pgsql, sql-mysql | the point query through `Cairo\Sql` (Cairo only) | 64 |
 | grpc-unary | `SayHello`, ghz, 4 connections, 64 concurrent | – |
 | grpc-stream-100 | `CountUp` server streaming 100 replies (Cairo only) | – |
 | grpc-slow-20ms | `SlowHello`, a 20 ms `Cairo\sleep()` (Cairo only) | – |
@@ -63,8 +61,7 @@ two binaries.
 Every server gets the same database budget: 40 connections to each database.
 The one-request-per-worker servers (FPM, FrankenPHP, RoadRunner) get 40
 workers, one connection each; Cairo and Swoole get 4 threads or processes
-sharing 40 connections (10 each). `Cairo\Sql` opens its own pool of 40, used
-only by the `sql-*` cases.
+sharing 40 connections (10 each).
 
 Machine: Intel i7-8565U laptop (4 cores, 8 threads, powersave governor),
 30 GB RAM, Ubuntu 26.04, kernel 7.0, Docker 29 with host networking. The
@@ -76,6 +73,9 @@ of warm-up, then 3 runs of 10 s; tables show the median.
 
 Requests per second, median of 3 runs, p99 latency in brackets. Cairo before
 the fixes (v0.1.0, other servers on 16 workers) is in `results-v0.1.0/`.
+The `client`, `sql-pgsql` and `sql-mysql` rows are from that date:
+`Cairo\Http\Client` and `Cairo\Sql` have left Cairo since, and `run.sh` no
+longer has these cases.
 
 | Case | Go net/http | Cairo | nginx + PHP-FPM | FrankenPHP | RoadRunner | Swoole |
 |---|---:|---:|---:|---:|---:|---:|

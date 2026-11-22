@@ -38,14 +38,11 @@ ALL_CASES=(
     "cpu-cached 64 /cpu-cached cairo"
     "sleep 256 /sleep"
     "curl 256 /curl"
-    "client 256 /client cairo"
     "pgsql 64 /pgsql"
     "pgsql-slow 256 /pgsql-slow"
-    "sql-pgsql 64 /sql-pgsql cairo"
     "mysql 64 /mysql"
     "mysql-slow 256 /mysql-slow"
     "mysql-slow-cached 256 /mysql-slow-cached cairo"
-    "sql-mysql 64 /sql-mysql cairo"
 )
 
 mkdir -p "$OUT" "$OUT/logs"

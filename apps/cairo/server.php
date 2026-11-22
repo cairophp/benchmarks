@@ -8,10 +8,8 @@ declare(strict_types=1);
 use Cairo\App;
 use Cairo\Context;
 use Cairo\Grpc\ServerStream;
-use Cairo\Http\Client;
 use Cairo\Http\Response;
 use Cairo\Pool;
-use Cairo\Sql\Db;
 use Helloworld\CountRequest;
 use Helloworld\GreeterInterface;
 use Helloworld\HelloReply;
@@ -70,14 +68,6 @@ $pg = new Pool(fn (): PDO => bench_pdo('pgsql'), max: $perThread);
 $my = new Pool(fn (): PDO => bench_pdo('mysql'), max: $perThread);
 $curl = new Pool(fn (): CurlHandle => curl_init(), max: 1024);
 
-// Cairo\Sql pools live in Go and are shared by all threads.
-[, $pgUser, $pgPass] = bench_pgsql_config();
-[, $myUser, $myPass] = bench_mysql_config();
-$sqlOptions = ['max_open' => $perThread * $threads];
-$sqlPg = Db::open(bench_env('BENCH_SQL_PGSQL', "postgres://$pgUser:$pgPass@127.0.0.1:5432/cairo"), $sqlOptions);
-$sqlMy = Db::open(bench_env('BENCH_SQL_MYSQL', "mysql://$myUser:$myPass@127.0.0.1:3306/bench"), $sqlOptions);
-$client = new Client(['timeout' => 10]);
-
 $app = new App();
 $app->threads($threads);
 $app->offloadThreads(1);
@@ -89,11 +79,6 @@ if (($slow = (float) bench_env('BENCH_SLOW_REQUESTS', '0')) > 0) {
 if (($heavy = (float) bench_env('BENCH_HEAVY_ROUTES', '0')) > 0) {
     $app->heavyRoutes($heavy);
 }
-// BENCH_REPEATED_QUERIES=1000 measures the cost of the repeated query detector (no route repeats a query that often).
-if (($times = (int) bench_env('BENCH_REPEATED_QUERIES', '0')) > 0) {
-    $app->repeatedQueries($times);
-}
-
 $text = static fn (string $body): Response => Response::text($body);
 $json = static fn (string $body): Response => new Response(200, ['Content-Type' => 'application/json'], $body);
 
@@ -111,19 +96,10 @@ $http->get('/mysql-slow-cached', fn (): Response => $json($my->with(bench_slow_q
     ->cache(ttl: 1, staleWhileRevalidate: 10);
 $http->get('/sleep', fn (): Response => $text(bench_sleep()));
 $http->get('/curl', fn (): Response => $text($curl->with(bench_curl(...))));
-$http->get('/client', fn (): Response => $text($client->get(bench_upstream_url())->body));
 $http->get('/pgsql', fn (): Response => $json($pg->with(bench_query(...))));
 $http->get('/pgsql-slow', fn (): Response => $json($pg->with(bench_slow_query(...))));
 $http->get('/mysql', fn (): Response => $json($my->with(bench_query(...))));
 $http->get('/mysql-slow', fn (): Response => $json($my->with(bench_slow_query(...))));
-$http->get('/sql-pgsql', fn (): Response => $json(json_encode(
-    $sqlPg->queryRow('SELECT id, name FROM bench_items WHERE id = $1', [random_int(1, BENCH_ROWS)]),
-    JSON_THROW_ON_ERROR,
-)));
-$http->get('/sql-mysql', fn (): Response => $json(json_encode(
-    $sqlMy->queryRow('SELECT id, name FROM bench_items WHERE id = ?', [random_int(1, BENCH_ROWS)]),
-    JSON_THROW_ON_ERROR,
-)));
 
 $app->grpc(':9000')
     ->proto($greeter . '/proto/helloworld.proto')

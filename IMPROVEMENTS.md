@@ -1130,6 +1130,156 @@ At 100 Go collects 45 times a second against 8, and each collection stops
 Go's side for 1.5 to 3 ms. Past 400 there is nothing left to gain, so the
 setting stays.
 
+## 23. The rest of the list: socket waits, thread recycling, Octane's fiber mode
+
+Candidates 20, 26, 27 and 28 of the list of optimizations, in
+cairophp/cairo (20 and the core's part of 26) and cairophp/octane (the
+driver's part of 26, 27 and 28), a commit for each. Two of the four did not
+do what the list had promised, and this section says so with the numbers.
+
+Machine and method as in step 22. The Laravel figures are the app of the
+Laravel benchmark through Octane with the Cairo driver: the server on 2
+CPUs, wrk on a third, MariaDB and the upstream service on the fourth.
+
+### 20. A hooked socket's read and write are tried first
+
+A read or a write of a hooked stream (PDO MySQL's, `fsockopen`) asked the
+kernel with `poll()` whether the socket was ready before every call, and
+PHP's own read polled once more after the fiber's wait. Now the hook calls
+`recv()` or `send()` without waiting, and the fiber waits only when the
+socket is not ready. The end of a stream and every error are left to PHP's
+own read and write.
+
+The GET of step 22 (two MySQL queries):
+
+| | Before | After |
+|---|---|---|
+| System calls per request | 19.29 | 15.70 |
+| of which `poll` | 6.00 | 0 |
+| of which `recvfrom` | 2.00 | 3.99 |
+| Server CPU per request, first run (6 alternating pairs, each lower) | 99.8 µs | 95.5 µs |
+| Server CPU per request, two hours later (8 alternating pairs, 4 lower) | 114.0 µs | 114.5 µs, +0.5% ± 1.8% |
+| Requests per second (24 rounds) | 17,430 | 17,574, +0.9% ± 1.8% |
+
+Four system calls fewer per request is what is certain (counted again two
+hours later: 21.65 and 17.86). The 4% of CPU of the first run did not come
+back in the second, on a machine that had become 15% slower by then, and
+the requests per second are inside the interval both times. A `poll()` of
+one socket is cheap, so the honest size of this step is about 1% of the
+request's CPU, below what these runs can show. The list had estimated +2%.
+
+### 26. Thread recycling
+
+The list: "recycling counts requests per app and the replacement boots
+before the old one leaves: up to +8% req/s, -25% p99 on fibers 4x64".
+
+**The requests per second are not there.** Laravel hello on fibers 4x8 with
+64 connections gives the same requests per second and CPU per request with
+a thread replaced every 500 requests, every 4,000, and never (0 replaced in
+the run); run-to-run noise is about ±5%. Recycling costs no throughput
+today. A first run that seemed to show +5% with recycling off was noise,
+and was not off: see the driver's bug below.
+
+**What was real is a stall.** Go put the new thread in the old one's place
+the moment it was created, before it had run `server.php`, so every request
+that came during the boot waited behind it. Now the new thread tells Go when
+it first comes to its loop, and the old one serves until then.
+
+| Laravel hello, a thread replaced every 500 requests | Before | After |
+|---|---|---|
+| Fibers 4x8, 4 connections: 99.9th percentile (3 runs) | 14.5, 15.6, 15.5 ms | 7.4, 8.9, 9.1 ms |
+| the same: 99th percentile | 5.9 to 6.3 ms | 5.1 to 5.4 ms |
+| Isolated, 40 threads, 16 connections: 99.9th percentile | 52.7, 55.5, 64.5 ms | 36.9, 34.6, 39.2 ms |
+| the same: 99th percentile | 23.2 ms | 20.8 ms |
+
+`examples/supervise` with a boot of 600 ms: the slowest request during a
+recycle was 603 ms and is under 300 ms now, which is the new test.
+
+**The driver.** Octane's `--max-requests` is a count for one worker, which
+is one booted app. A thread in fiber mode holds `--concurrency` apps, and
+the driver gave the thread the count of one, so with the defaults a thread
+was replaced after 500 requests, about 62 for each of its 8 apps. The
+thread's limit is now `--max-requests` times `--concurrency`: 96 threads
+replaced in 25 s before, 11 after, and the 99.9th percentile on fibers 4x8
+with 4 connections is 9.9 to 11.4 ms with this alone and 6.9 to 7.9 ms with
+both parts.
+
+**A bug found on the way:** `--max-requests=0` did not turn recycling off.
+The driver read "0" as not set and used 500. Fixed, with a test.
+
+**A fact found on the way:** Go's HTTP server waits up to 5 s at its stop
+for a connection that a client opened and never used. A stop with one such
+connection takes 5.2 s on `main` too. One test's client left such a
+connection in one run of five once answers during a recycle came faster,
+and the test now closes its idle connections first.
+
+**On a request that recycles nothing** the core's part changes nothing: the
+GET of step 22, the build before against the build after, 15,794 and 15,648
+req/s, -0.8% ± 2.6% with a median of 0.0% (20 rounds).
+
+### 27. Requests per thread in fiber mode
+
+The list asked for 8 to 10 as the default. **The default was 8 already**, so
+no code changed; what was missing is when to raise it. A page with two
+Eloquent queries and two HTTP calls to another service, 256 connections,
+median of 3 runs of 10 s, memory once every app has booted:
+
+| | Calls answer in 20 ms | Calls answer in 200 ms | Memory (PSS) |
+|---|---:|---:|---:|
+| isolated, 40 workers | 534 | 95 | 207 MB |
+| fibers, 4 workers x 8 | 540 | 76 | 136 MB |
+| fibers, 4 x 16 | 565 | 150 | 165 MB |
+| fibers, 4 x 32 | 505 | 296 | 264 MB |
+| fibers, 4 x 64 | 442 | 527 | 364 MB |
+| fibers, 8 x 8 | 548 | 153 | 177 MB |
+
+With calls of 20 ms the two CPUs are the limit and more requests at once
+only share them: 64 per thread is 18% slower than 8 and its 99th percentile
+is 1,030 ms against 528 ms. With calls of 200 ms the wait is the limit, and
+each doubling of the requests per thread doubles the requests per second.
+Hello with 64 connections is level across the shapes (2,009 to 2,301).
+The driver's README has the table and the rule.
+
+### 28. The statics of an app in fiber mode
+
+In fiber mode the driver puts the statics that belong to an app in place
+before each request and reads them back after it, 43 of them on Laravel 13,
+through Reflection. The list estimated 1% of the CPU and proposed to do it
+without Reflection.
+
+| Measured | Result |
+|---|---|
+| The two steps 200,000 times in a loop on PHP's CLI, Reflection | 4.7 µs |
+| the same with a closure bound to each class, or to each property | 4.0 to 4.5 µs |
+| The two steps inside the server (Laravel hello, 2 connections) | 21.5 µs: putting in place 10.5, reading back 11.0 |
+| each property on its own inside the server, 200 times in a row | 4.1 µs for all 43 |
+
+**Reflection is not what costs.** In a loop the step is cheap whichever way
+it is written. After a whole Laravel request the 43 properties and their
+values are no longer in the CPU's caches, and each is several memory reads
+away: that is the difference between 4 and 21 µs, about 2% of a hello
+request of 1,000 µs and 0.6% of the page of candidate 27.
+
+Kept: the read-back loops over the properties itself instead of calling a
+closure for each (`array_map`): 11.0 → 8.8 µs inside the server.
+
+Not built: a way in Cairo's core to hand a request its app's stored statics
+as a whole. Cairo copies its own start values into each request first, and
+the driver then overwrites them one by one; handing over the stored set
+would save most of the 20 µs. It is a new public API in the part of the
+core that keeps the state of requests apart, for 0.6% of a real page. Put to Mohamed, who
+chose to leave it.
+
+### `main` against the branch
+
+The GET of step 22, `main` (3b8ea18) against the finished branch of
+cairophp/cairo: 15,852 and 15,634 req/s, -1.3% ± 2.2% (16 rounds). This
+round does not make that request faster, and within what the machine can
+show it does not make it slower. What it changes is elsewhere: four system
+calls fewer per request, no stall behind a booting thread, a driver that
+recycles as Octane means it, and two entries of the list that are now
+closed with their real numbers.
+
 ## Tried and not kept
 
 | Change | Result | Branch |
@@ -1157,6 +1307,9 @@ setting stays.
 | A reused timer and context for `timeout()` | Not built: the response cache's background refresh keeps the request's context after the request, so a pooled one could be read after its reuse | – |
 | `Request::header()` through an index by lower-case name, built at the first lookup | Slower than the loop it replaces for the one lookup in an unusual spelling that most such requests make (664 ns against 327 ns). A direct lookup of the canonical spelling was kept instead | not kept (step 22) |
 | Go's GC percent above 400 | 800: -0.3% ± 2.5%; 1600: 0.0% ± 3.1% on the request of step 22, for a larger heap | not kept (step 22) |
+| Counting recycled requests per app in the core, for a server with several apps on a thread | Not built: a new public API for one caller. The Octane driver multiplies its limit by its apps (step 23) | – |
+| Recycling threads less often for more requests per second | Nothing to gain: Laravel hello gives the same requests per second and CPU with a thread replaced every 500 requests and never | not kept (step 23) |
+| The statics of an Octane app through closures bound to their classes instead of Reflection | No faster: 4.0 to 4.5 µs against 4.7 µs in a loop, and the cost inside the server is cold memory, not the call | not kept (step 23) |
 
 ## Where the time goes now
 

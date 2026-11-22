@@ -30,6 +30,11 @@ these benchmarks, why, and Cairo's numbers after each one.
 one request on an idle server, and `coreops/compare.py` compares the runs of
 two binaries.
 
+`real/rounds.sh` measures a request shaped like an application's (a
+browser's headers, two MySQL queries, a JSON answer; also uploads, large
+answers and a cached page) under several binaries or settings in rotating
+rounds, and `real/rounds.py` compares them.
+
 ## Cases
 
 | Case | What one request does | wrk connections |

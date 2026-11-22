@@ -1010,6 +1010,126 @@ reply, from a server that an app calls, ended the Cairo process that made
 the call, unary or streamed. 17d closes it, and its test
 (`TestGRPCClientDamagedReply`) fails on the commit before.
 
+## 22. The HTTP round: requests shaped like an application's
+
+One pull request, [cairophp/cairo#40](https://github.com/cairophp/cairo/pull/40),
+with a commit for each step: candidates 30, 31, 34 and 32 of the list of
+optimizations. Candidates 23 and 33 were measured and nothing of them was
+built. Its description has the options that were compared and the tests;
+this is the record of what each step measured.
+
+Until here every step was judged on hello and on one-query routes. This
+round is judged on a request that an application makes, because a gain on
+hello says little about one: the whole HTTP layer is about a third of this
+request's CPU, and under 5% of a Laravel request's.
+
+### The request, and how it was measured
+
+`real/server.php` with `real/real.lua`: `GET /api/items/{id}?page=2` with
+the 13 headers a browser sends (856 bytes), a check of `Authorization`, two
+PDO MySQL queries through `Cairo\Pool` (one row, then 20 rows) and a JSON
+answer of about 1.5 KB with five headers. Beside it: a POST of a 1 KB JSON
+order with the same two queries, a public page of the same data cached for a
+minute, uploads of 100 KB and 1 MB, and answers of 100 KB and 1 MB.
+
+The cloud VM of step 19, the server on 2 CPUs with 4 PHP threads, wrk with
+64 connections on the other two, MariaDB on the same machine. `real/rounds.sh`
+runs the configurations in turn, in an order that rotates each round, 8 s
+each after 2 s of warm-up; `real/rounds.py` compares them by the ratio of
+each round. A figure after "±" in this section is the 95% interval of those
+ratios (1.96 standard errors), not one standard error as in the sections
+before. The machine's speed moved by a quarter over the evening, so only
+figures of one run compare.
+
+Before the round, the GET cost 125.5 µs of CPU: PHP 34.4 (the handler, PDO's
+calls, the pool), the MySQL driver and its socket 27.4, Go's net/http 32.7
+(reading and parsing 10.1, writing 8.0, the goroutine that watches the
+connection 5.7), Cairo's Go 12.3 (dispatch 5.3, the route handler 4.4), the
+kernel and Go's collector the rest. Without the database the same request
+costs 58.2 µs, and hello with the same headers 46.5 µs.
+
+### mysqlnd's statistics (candidate 19): measured, documented, not a default
+
+With `mysqlnd.collect_statistics` on, PHP's default, the GET serves 12,084
+req/s; off, 15,360: +27.3% ± 2.3% (10 rounds). A thread-safe PHP takes a
+global mutex for every counter, and the request makes 20.7 futex calls with
+them on against 0.45 off. On the one-row `/mysql` route it is +8.7%. Cairo
+does not change PHP's default: the docs recommend the setting
+([mysql.md](https://github.com/cairophp/docs/blob/main/mysql.md)), and
+`real/php.ini` has it off for everything below.
+
+### Each step
+
+Each commit's binary against the one before it.
+
+| Step | What changed | Measured |
+|---|---|---|
+| 30 | The route handler: PHP's answer is decoded from one copy of its bytes, with canonical header names and one slice for all values; the response shares those slices with the client's header; the cache finds its three headers by name; the request's header names are sorted on the stack | The GET: 13,506 → 14,013 req/s (+4.0% ± 3.1%, 20 rounds). `BenchmarkAPIRoute`: 5,363 ns and 45 allocations → 4,448 ns and 21 |
+| 31 | A cached route makes its key and looks the entry up before it reads the request, and builds the event only when PHP is going to be called | The cached page: 69,419 → 73,678 req/s (+6.3% ± 4.0%, 12 rounds). `BenchmarkCacheHit`: 843 ns and 10 allocations → 560 ns and 6 |
+| 34a | An upload is read into one buffer sized from `Content-Length` (1 MiB of it on trust, then doubling as it fills) instead of `io.ReadAll`'s buffer that grows and is copied | Upload of 1 MB: 1,010 → 1,637 req/s (+62.0% ± 5.5%). Of 100 KB: 5,868 → 9,986 (+70.4% ± 8.3%). 8 rounds |
+| 34b | An answer of 32 KiB or more stays in the C memory PHP queued it in: the HTTP server writes it to the client from there and frees it, instead of the collecting goroutine copying it into a Go slice | Answer of 1 MB: 2,018 → 3,164 req/s (+58.1% ± 16.1%). Of 100 KB: 10,172 → 15,201 (+49.8% ± 8.8%). 8 rounds |
+| 34c | A request's body is copied once on its way to the PHP thread instead of twice: the event leaves it out and the engine copies it behind the event, into the thread's message | Upload of 1 MB: 1,854 → 2,228 req/s (+20.2% ± 6.3%). Of 100 KB: 11,051 → 13,534 (+22.5% ± 3.1%). 6 rounds |
+| 32 | PHP's side: `Request::header()` finds a canonical name with one array lookup, `Request::query()` parses the query string once per request, an answer skips `Form::track()` without files | `real/request-bench.php` on PHP's CLI: a handler's three headers, one query value and one parameter cost 1,485 ns before and 769 ns after. That is 0.7 µs of a request's 104 µs, too little for the rounds to show |
+
+Before 34a, `io.ReadAll` was 41% of the CPU of a 1 MB upload (copying 28.1%,
+zeroing 11.6%) and the copy into the event 10.7%; after it that copy was 17%,
+which is what 34c removes. Before 34b the copy into a Go slice was 21.7% of
+a 1 MB answer, with the page faults of a new megabyte of heap each time.
+
+### `main` against the branch
+
+`main` (f1f994a) against the finished branch, one run of alternating rounds
+per row:
+
+| Request | `main`, req/s | Branch, req/s | Change |
+|---|---|---|---|
+| The GET (16 rounds) | 15,389 | 15,748 | +2.4% ± 1.9% |
+| POST of the 1 KB order (6 rounds) | 13,258 | 14,625 | +10.5% ± 3.3% |
+| The cached page (6 rounds) | 62,584 | 65,823 | +5.4% ± 4.2% |
+| Upload of 100 KB (6 rounds) | 6,451 | 13,265 | +106% ± 7% |
+| Upload of 1 MB (6 rounds) | 1,111 | 2,173 | +96% ± 3% |
+| Answer of 100 KB (6 rounds) | 10,839 | 16,708 | +54% ± 8% |
+| Answer of 1 MB (6 rounds) | 2,069 | 3,210 | +56% ± 8% |
+
+The GET's gain is small because its HTTP part already was: what the round
+changes there is the route handler's 4.4 µs. The gains are where a body is.
+
+### Middleware (candidate 23): measured, nothing kept
+
+On the GET, against no middleware:
+
+| Middleware | Change | Rounds |
+|---|---|---|
+| `accessLog()` | -5.9% ± 3.2% | 8 |
+| `requestId()` | -4.5% ± 9.2% | 6 |
+| `timeout(5.0)` | -3.0% ± 7.1% | 6 |
+| All three | -13.3% ± 4.4% | 6 |
+
+Only the access log and the three together are told apart from nothing. In
+a profile the three cost about 10.6 µs per request: the access log about 6,
+nearly all of it `log/slog` formatting the line, the timeout 2.6 and the
+request id 1.8. Neither the timeout nor the request id makes a system call.
+
+What was tried is under "Tried and not kept": the log line with typed
+attributes, the logger behind a buffer, ids from a counter, a reused timer.
+
+### Go's collector (candidate 33): already in place
+
+Cairo sets Go's GC percent to 400 when `GOGC` is not set, since step 2b of
+this record. The candidate was listed without that having been
+checked. Measured again on the GET (10 rounds each run):
+
+| `GOGC` | Against 400 |
+|---|---|
+| 100, Go's default | -14.7% ± 2.6% |
+| 200 | -3.4% ± 2.7% |
+| 800 | -0.3% ± 2.5% |
+| 1600 | 0.0% ± 3.1% |
+
+At 100 Go collects 45 times a second against 8, and each collection stops
+Go's side for 1.5 to 3 ms. Past 400 there is nothing left to gain, so the
+setting stays.
+
 ## Tried and not kept
 
 | Change | Result | Branch |
@@ -1031,6 +1151,12 @@ the call, unary or streamed. 17d closes it, and its test
 | The lists of the scheduler (step 19o) in `malloc` memory | Built first and replaced: outside `memory_limit` and `maxMemory()`, so timers left behind by waits that ended early could grow unseen | replaced in 19o |
 | Pinning the fast level of the smallest operations (code and data layout) | Nothing to pin: the two levels are the machine's slow stretches (step 19), and layout moves these operations by about 1% | – |
 | opcache's tracing JIT for the Laravel benchmark (`opcache.jit=tracing`, 128 MB buffer) | No difference in two alternating runs (373-383 and 360-369 without, 343-368 and 362-372 with): framework code is calls and hash lookups, which the JIT does not speed up | not kept |
+| The access log's line with typed attributes (`LogAttrs`) | -2.1% ± 2.8% against the present code on the request of step 22 (8 rounds, 95% interval): the cost is slog formatting the line, not building its arguments | not kept (step 22) |
+| The logger behind a 64 KiB buffer | -0.8% ± 4.1% in the same run, and it is the most a batched log could gain; log lines would come late and the last ones be lost in a crash | not built (step 22) |
+| Request ids from a counter instead of `crypto/rand` | Not built: making an id is 0.26% of the request's CPU, and ids would become guessable | – |
+| A reused timer and context for `timeout()` | Not built: the response cache's background refresh keeps the request's context after the request, so a pooled one could be read after its reuse | – |
+| `Request::header()` through an index by lower-case name, built at the first lookup | Slower than the loop it replaces for the one lookup in an unusual spelling that most such requests make (664 ns against 327 ns). A direct lookup of the canonical spelling was kept instead | not kept (step 22) |
+| Go's GC percent above 400 | 800: -0.3% ± 2.5%; 1600: 0.0% ± 3.1% on the request of step 22, for a larger heap | not kept (step 22) |
 
 ## Where the time goes now
 

@@ -885,6 +885,74 @@ both directions, and a second 40 rounds gave -0.3%. Reading: no change that this
 three routes lean one to two percent low, none by more than two standard
 errors, and nothing points at a cause in the code.
 
+## 21. The extensions round begins: gRPC messages and PDO PostgreSQL without JSON
+
+One pull request, [cairophp/cairo#39](https://github.com/cairophp/cairo/pull/39),
+with a commit for each step: candidates 17 and 18 of the list of
+optimizations. Its description has the options that were compared and the
+tests; this is the record of what each step measured.
+
+Until here a gRPC message went from protobuf's bytes to a message object, to
+protojson's text, to PHP's array, and the same way back, and every reply of
+a stream was a Go operation of its own. PDO PostgreSQL sent each request to
+Go as JSON, with parameters as base64 inside it, and got its answer as JSON
+again.
+
+### How it was measured
+
+The cloud VM of step 19, the server on 2 CPUs with 4 PHP threads, the load on
+the other two. gRPC: ghz with 4 connections and 64 concurrent calls, 20
+alternating rounds of 4 s, each commit's binary against the one before it;
+"unary" is `SayHello`, "stream" is `CountUp` with 100 replies, counted in
+calls. `/pgsql`: wrk at 64 connections, 40 alternating rounds of 5 s. A
+figure after "±" is one standard error.
+
+### Each step
+
+| Step | What changed | Unary, calls/s | Stream of 100, calls/s |
+|---|---|---|---|
+| 17a | The descriptors of the `.proto` files are protobuf-go's own (`protodesc.NewFile`) instead of the compiler's wrappers | 19,227 → 18,851 (-1.7% ± 1.7%) | 1,833 → 1,946 (+6.6% ± 2.2%) |
+| 17b | `internal/pbwire` converts between protobuf's bytes and PHP's array directly; what it does not convert exactly as protojson would goes through protojson | 18,335 → 19,403 (+6.1% ± 2.0%); CPU per call 75.8 → 64.0 µs | 1,991 → 3,202 (+61.5% ± 4.0%); CPU per call 988 → 586 µs |
+| 17c | A streamed reply is queued in Go by one direct call (`cairo_grpc_send()`) instead of an operation | 19,703 → 19,789 (+0.8% ± 2.4%) | 3,290 → 5,046 (+54.2% ± 3.7%); CPU per call 578 → 325 µs |
+| 17, all | `main` (48404fb) against 17b in one run, then 17c against 17b | 18,136 → 19,403 (+7.4% ± 2.1%) | 1,686 → 3,202 → **5,046**, about 3 times |
+
+| Step | What changed | `/pgsql`, req/s |
+|---|---|---|
+| 18 | The driver's requests and answers cross as arrays in the binary form, parameters as bytes | 17,655 → 18,055 (+2.6% ± 1.2%); CPU per request 105.8 → 103.5 µs |
+
+Per message, in a Go benchmark of a small message (`BenchmarkMessage`): to
+PHP 2,225 ns and 25 allocations through protojson, 117 ns and none directly;
+from PHP 2,960 ns and 26 allocations, 160 ns and one. 17a's first run is
+against `main`; in the run of 17b the same pair gave +19.0% ± 2.7% on the
+stream, so its size is less certain than its sign.
+
+### What the profiles say
+
+A streamed reply costs 3.26 µs of the server's CPU after 17c (11.7 µs on
+`main`). The call from PHP into Go and back is 0.10 µs of that. The plan had
+the replies go through the queue of answers that the core has since step
+19j, with no call at all: that could save 3% at most, before the cost of a
+second hop through the goroutine that collects the queue, and it would
+report a failed send late. So it was not built. What is left is PHP running
+the handler and the generated classes, grpc-go and HTTP/2, and Go's
+allocator.
+
+On `/pgsql`, JSON and base64 were 3.6% of the server's CPU and are 0.3%
+(the route's own `json_encode`); `internal/wire` went from 0.4% to 0.7%.
+The larger part of a PostgreSQL query is elsewhere and untouched: the query
+is a Go operation (the hand-over to a goroutine and back, and pgx waiting in
+Go's poller), where PDO MySQL waits on the thread's own epoll. `/pgsql`
+costs 104 µs of CPU per request against 67 µs for `/mysql`.
+
+### A crash found on the way
+
+The fuzz test of the new converter found a message that protobuf-go
+(1.36.12) panics on: a map entry whose key comes a second time with another
+wire type. On `main` a unary call recovers the panic, but in a
+client-streaming or bidirectional method it happens in a Go operation that
+nothing recovers, and the server stops. 17b refuses such a message with
+INTERNAL in both places.
+
 ## Tried and not kept
 
 | Change | Result | Branch |

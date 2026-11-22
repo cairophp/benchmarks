@@ -889,7 +889,8 @@ errors, and nothing points at a cause in the code.
 
 One pull request, [cairophp/cairo#39](https://github.com/cairophp/cairo/pull/39),
 with a commit for each step: candidates 17 and 18 of the list of
-optimizations. Its description has the options that were compared and the
+optimizations, and then the rest of gRPC (the client, and both directions
+of a stream). Its description has the options that were compared and the
 tests; this is the record of what each step measured.
 
 Until here a gRPC message went from protobuf's bytes to a message object, to
@@ -944,7 +945,58 @@ is a Go operation (the hand-over to a goroutine and back, and pgx waiting in
 Go's poller), where PDO MySQL waits on the thread's own epoll. `/pgsql`
 costs 104 µs of CPU per request against 67 µs for `/mysql`.
 
-### A crash found on the way
+### The rest of gRPC: the client and both directions of a stream
+
+After 17c a streamed reply was cheap to send from a handler, and everything
+else on a stream was still a Go operation per message: the fiber parks, a
+goroutine does the one call, an event comes back and the thread wakes for
+it. Reading a message cost about 15 µs of CPU on the side that read it, and
+sending a request on a client's stream about 17 µs. `Cairo\Grpc\Client`
+also still converted through protojson.
+
+The client is measured on a front server whose route makes the call to a
+second Cairo server: wrk at 32 connections against the front, which has 2
+CPUs and 4 PHP threads, 20 alternating rounds of 4 s. The handler that
+reads is measured with ghz as before, on `JoinNames` with 100 messages per
+call.
+
+| Step | What changed | Measured |
+|---|---|---|
+| 17d | The client uses the server's converter and passes raw bytes to grpc-go; a method is resolved once instead of hashing its `.proto` files on every call | A route with one unary call: 12,982 → 13,955 req/s (+7.7% ± 1.8%); CPU per request 140.1 → 128.4 µs. A route that reads a stream of 100 replies: 873 → 1,206 (+38.3% ± 1.7%) |
+| 17e | Go reads a stream ahead of PHP, 64 messages or 1 MiB at most, and one `recv` operation brings all that has arrived; for a handler and for the client | The route that reads 100 replies: 1,238 → 3,618 req/s (+193% ± 4.8%); CPU per request 1,580 → 504 µs. A handler that reads 100 messages: 1,539 → 4,492 calls/s (+193% ± 4.9%); CPU per call 1,276 → 370 µs. Unary through the client, as a control: +1.9% ± 1.6% |
+| 17f | A client stream's `send()` queues the request in Go with one direct call, as a handler's does since 17c | A route that sends 100 requests on a client-streaming call: 919 → 2,998 req/s (+227% ± 5.9%); CPU per request 2,101 → 609 µs. The route that reads 100 replies, which opens with one operation less: +5.2% ± 2.7% |
+
+`main` (48404fb) against the finished branch in one run of 10 rounds, on the
+same VM later the same day (it had restarted in between and was slower:
+`main` served 15,714 unary calls per second here against 18,136 in the
+morning):
+
+| | `main` | Branch | Change | CPU per call or request |
+|---|---|---|---|---|
+| Unary calls served | 15,714 | 17,422 | +11.1% ± 2.1% | 89.0 → 72.8 µs |
+| A handler sends 100 replies | 1,539 | 4,337 | +183% ± 9% | 1,283 → 385 µs |
+| A handler reads 100 messages | 977 | 4,082 | +320% ± 14% | 2,019 → 411 µs |
+| A route makes one unary call | 12,188 | 12,583 | +3.3% ± 2.0% | 149.0 → 142.3 µs |
+| A route reads 100 replies | 802 | 3,140 | +294% ± 13% | 2,433 → 577 µs |
+| A route sends 100 requests | 811 | 3,244 | +301% ± 11% | 2,370 → 564 µs |
+
+The first three rows are calls per second, the last three requests per
+second of the front server.
+
+What is left, from profiles of the front server on the finished branch. In
+a unary call through the client, grpc-go and HTTP/2 are about 26% of the
+front's CPU (its `Invoke` 11.5%, its writer 9.6%, its reader 5.0%) and the
+conversion both ways 0.65%; the call stays one Go operation, since it has
+to wait for its reply. Reading a stream, the goroutine that reads ahead is
+19.7%, nearly all of it grpc-go's `RecvMsg`, and the conversion 2.9%.
+Sending on a stream, grpc-go's `SendMsg` in the writer is 15.6% and the
+direct call from PHP 10.4%, of which the conversion is 3.6%.
+
+Not done: when a stream's queue is full, the message that found it full is
+converted a second time by the operation that waits for room. That costs
+one conversion (0.15 µs) on a path that then waits for the network.
+
+### Two crashes found on the way
 
 The fuzz test of the new converter found a message that protobuf-go
 (1.36.12) panics on: a map entry whose key comes a second time with another
@@ -952,6 +1004,11 @@ wire type. On `main` a unary call recovers the panic, but in a
 client-streaming or bidirectional method it happens in a Go operation that
 nothing recovers, and the server stops. 17b refuses such a message with
 INTERNAL in both places.
+
+The client had the same hole from the other side: the same bytes in a
+reply, from a server that an app calls, ended the Cairo process that made
+the call, unary or streamed. 17d closes it, and its test
+(`TestGRPCClientDamagedReply`) fails on the commit before.
 
 ## Tried and not kept
 

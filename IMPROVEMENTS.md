@@ -1440,7 +1440,21 @@ are reported as one that kept its thread for 100 to 120 ms, on `main` and
 on this branch. The detector reads the time since the thread last came to
 its loop, and several fibers ran in it. It needs a clock of its own that
 begins again between fibers (dispatch must keep the one it has, see the
-table). Not built in this step.
+table).
+
+**Fixed after, in cairophp/cairo#43.** The thread notes in its mailbox when
+it goes on from one ready fiber to the next, and the detector is told the
+later of that and of when the thread left its loop. Dispatch reads what it
+read before. A turn that runs one fiber, which is the path of a socket
+wait, pays nothing; each further fiber of a row costs one clock read (30
+to 40 ns).
+
+| Against the build before | |
+|---|---|
+| Ten tasks, or ten requests, that sleep 200 ms and then each compute 30 ms; threshold 100 ms | 1 and 2 reports before, none now |
+| Five such tasks of which the last blocks for 300 ms | one report, with its stack |
+| The GET of step 22, two series of 10 alternating rounds | +4.2% ± 1.4% and -0.0% ± 3.0%: no change |
+| The request that sleeps 50 ms and computes 1 ms, 5 rounds | 1,087 ± 2 against 1,080 ± 4 |
 
 ## Tried and not kept
 

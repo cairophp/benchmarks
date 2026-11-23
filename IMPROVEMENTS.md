@@ -1280,6 +1280,168 @@ calls fewer per request, no stall behind a booting thread, a driver that
 recycles as Octane means it, and two entries of the list that are now
 closed with their real numbers.
 
+## 24. The end of the list: the PHP side of a socket wait, and `Pool::with`
+
+Candidates 25 and 32 (its rest) of the list of optimizations, the last two
+that were open. One is built, in cairophp/cairo; the other is measured and
+nothing of it is kept. A first version of the built one made Laravel 5%
+slower, and this section says how that was found and what it was.
+
+Machine and method as in step 22. Neither candidate had ever been sized, so
+both began with a measurement inside the running server: `hrtime()` around
+the PHP in question and `clock_gettime()` around the C, added for the
+measurement and taken out again, on the GET of step 22 (two MySQL queries)
+with one PHP thread and 8 connections, so that the thread is not waiting
+for a CPU while it is being timed.
+
+**PHP that runs between two waits is several times slower than the same
+PHP in a loop.** A call of a small PHP method costs about 0.25 µs here,
+where a loop measures 0.05: after a whole request of other fibers, its
+code and data are no longer in the CPU's caches. Step 23 found the same
+for the statics of an app. An estimate from a loop is of no use for this
+kind of code.
+
+### 32. A fiber's wait on a socket
+
+A read of a hooked socket that finds nothing waits: every MySQL query does
+at least once. On `main` that wait went from C into PHP and ran seventeen
+PHP functions: is the hook on (six calls), may the thread wait itself
+(two), a `Waiter` object, the socket into the thread's epoll, the
+deadline, the park, and the same undone after it. When the socket was
+ready, the loop returned its number to PHP, which looked up the `Waiter`
+and woke it.
+
+| One wait on a socket, time of the thread outside the fiber's suspension | |
+|---|---|
+| `main` | 5.0 to 5.3 µs, and 0.5 µs more in the loop when the socket is ready |
+| the arming, the park and the wake-up in C (`cairo_wait_socket()`) | 3.2 to 3.8 µs |
+| and the app's hook flags read once instead of at every wait | 2.9 to 3.3 µs |
+
+Now one call into C arms the socket and parks the fiber, the thread's
+table of who waits on which socket is in C, and the loop wakes the fiber
+itself. `Waits` in PHP lost three methods, a property and an object for
+each wait. What is left of a wait: 1.9 µs of PHP before the C call (eight
+functions: the fiber's context, the scheduler, whether its context has
+ended, its deadline), 0.65 µs for `epoll_ctl`, 0.35 µs after it.
+
+The GET makes two such waits, so about 5 µs of its 105 µs of CPU are gone.
+System calls are the same in kind and number (`epoll_ctl` 1.95 and 1.93 a
+request).
+
+| Requests per second against `main`, alternating rounds | |
+|---|---|
+| The GET, first version, 20 rounds | +2.4% ± 1.9% |
+| the same, 20 rounds an hour later | -1.0% ± 2.5% |
+| the same, 20 rounds after that | +2.7% ± 2.8% |
+| The GET, final version, 20 rounds | +1.9% ± 3.5% (median +2.8%) |
+| Server CPU per request, first version, 10 rounds | -2.8% ± 3.2% |
+| Laravel through Octane, fibers 4x8, the dashboard of step 23 at 64 connections, final version | 539 against 520 (6 and 12 runs of 10 s; runs spread ±3%) |
+
+**The requests per second are not proven.** The machine was noisy that
+night: single rounds of 8 s differ by ±10%, and one series of twenty came
+out below zero. Every other series is above it and they agree on about 2%,
+which is what 5 µs of 105 should give. The firm numbers are the time of a
+wait above.
+
+**The first version made Laravel 5% slower** (dashboard: 492 requests per
+second against 520, in both orders). It woke every fiber whose socket was
+ready in one call of the loop, and in the same call it took the next event
+of the inbox. `main` does neither on a thread that has nothing else to
+run: it takes one socket a turn, and no event while a socket is ready.
+
+My first reading of the cause was wrong. I took it for the clock that Go
+reads: how long a thread has run PHP since it last came to its loop, after
+which dispatch passes it over (`stuckAfter`, 5 ms). A cross-check with one
+build for each difference says otherwise:
+
+| Laravel dashboard, fibers 4x8, 64 connections, 6 runs of 10 s each, orders mirrored | Requests per second |
+|---|---|
+| One socket a turn, no event with it (final version, as `main`) | 548 ± 6 |
+| Every ready socket in one call, no event with them | 542 ± 8 |
+| Every ready socket in one call and an event with them (the first version) | 520 ± 7 |
+| the same, with Go's clock begun again between fibers | 528 ± 3 |
+| One socket a turn and an event with it | 504 ± 3 |
+
+**The order is the cause.** An event is most often a new request, and PHP
+begins it before it runs the fibers that are ready. A fiber whose socket
+is ready runs for a short time and then waits again, on its next query or
+upstream call; a new request computes for longer before its first wait.
+Begun ahead, it delays the waits of all the requests that are under way.
+How many sockets a turn takes changes nothing that the benchmark can see,
+and neither does the clock.
+
+One socket a turn is kept for another reader of that clock, the blocking
+detector: it would report fibers that each ran for a short time. A test
+holds it: ten fibers whose sockets are ready at the same moment and that
+each compute for 30 ms are not reported as blocking with a threshold of
+100 ms. It fails on the first version.
+
+Not built: the eight PHP functions that are left. Without them a wait
+would be about 1 µs, but whether a context has ended and when its deadline
+is are PHP's to say today (`Context`), and C would have to keep both.
+
+### 32. The clock reads of the loop
+
+The profile of the GET has 0.6% of the server's CPU in `clock_gettime`
+below `cairo_next_event()`. A read costs 30 to 40 ns on this machine and a
+call of the loop makes two: the wall clock for when the thread began to run
+PHP, which Go compares with its own, and the monotonic clock for the
+timers. Part of the 0.6% is the reads of the short watch before a thread
+sleeps (step 19), which is waiting, not work. One read less in a call would
+be 0.1% of the GET and would put both sides on one clock. Not changed.
+
+### 25. `Pool::with`
+
+| `$pool->with(fn)` inside the server, without the time in `fn` | |
+|---|---|
+| Borrowing a connection | 0.70 µs |
+| Giving it back | 1.35 µs |
+| Giving it back with two calls less (no exception object for a context that has not ended, no look for a waiting fiber when none waits) | 1.23 µs |
+
+2 µs of a request of 105 µs, in six PHP calls: the fiber's context,
+whether it has ended, the transaction check of PDO, the fiber that waits
+for a connection. The two trims saved 0.1 µs, inside what the probe tells
+apart from run to run, and nothing in requests per second (+2.2% ± 1.3%
+with them against +2.4% ± 1.9% without, on top of candidate 32). **Not
+kept.** Less than this would mean a pool in C, for 2% of a small request.
+
+### Where the list ends
+
+All 34 candidates are closed except 21, 22 and 29, which are set aside.
+What the measurements of this step leave as a lead: a wait on a socket that
+does not enter PHP (about 2 µs a query).
+
+### Checked after: the fibers that one tick of the timers wakes
+
+The loop wakes every fiber whose time is up in one call, takes an event in
+the same call, and PHP runs them all without the thread coming back to its
+loop: the two things the first version above did for sockets. Measured
+with one build for each change, none of them kept:
+
+| | Today | Go's clock begun again between fibers | Fibers whose time is up run before a new event |
+|---|---|---|---|
+| Plain PHP: a request sleeps 50 ms, then computes 1 ms; 4 threads, 64 connections | 1,087 ± 3 (8 rounds), 1,082 ± 6 (5 rounds) | 1,012 ± 2 | 1,043 ± 6 |
+| Laravel through Octane, fibers 4x8: two queries and two sleeps of 20 ms, 64 connections | 609 ± 5, 623 ± 4 | 606 ± 3 | 627 ± 3 |
+
+**Nothing to gain, and the plain request loses 4 to 7% with either
+change.** Here the new request is the short one (it goes to sleep at once)
+and the fibers that woke are the ones that compute, so today's order is
+the right one for them. And a thread that has ten such fibers to run does
+keep a new request waiting, so dispatch is right to pass it over: with the
+clock begun again between fibers it no longer does, and the median wait
+grows from 57 to 64 ms. A rule in dispatch that gives a thread no more
+requests than `maxInFlight` allows was tried on the same pages too: 601 ±
+2 against 609 ± 5, and on the dashboard 512 ± 4 against 510 ± 3 (both on
+the build that wakes every ready socket). Nothing.
+
+**One fault is real: the blocking detector blames the wrong fiber.** Ten
+requests that sleep until the same moment and then each compute for 30 ms
+are reported as one that kept its thread for 100 to 120 ms, on `main` and
+on this branch. The detector reads the time since the thread last came to
+its loop, and several fibers ran in it. It needs a clock of its own that
+begins again between fibers (dispatch must keep the one it has, see the
+table). Not built in this step.
+
 ## Tried and not kept
 
 | Change | Result | Branch |
@@ -1310,6 +1472,10 @@ closed with their real numbers.
 | Counting recycled requests per app in the core, for a server with several apps on a thread | Not built: a new public API for one caller. The Octane driver multiplies its limit by its apps (step 23) | – |
 | Recycling threads less often for more requests per second | Nothing to gain: Laravel hello gives the same requests per second and CPU with a thread replaced every 500 requests and never | not kept (step 23) |
 | The statics of an Octane app through closures bound to their classes instead of Reflection | No faster: 4.0 to 4.5 µs against 4.7 µs in a loop, and the cost inside the server is cold memory, not the call | not kept (step 23) |
+| Taking an event of the inbox in the same turn as the sockets that are ready (first version of step 24) | Laravel's dashboard through Octane 5 to 8% slower (520 and 504 against 548): new requests begin ahead of the fibers that are ready to go on. Waking every ready socket in one call changes nothing by itself (542 against 548), but the blocking detector would blame the wrong fiber; one socket a turn, as before, is kept | not kept |
+| For the fibers that one tick of the timers wakes: Go's clock begun again between fibers, or those fibers run before a new event (step 24) | A request that sleeps and then computes: 4 to 7% slower with either (1,012 and 1,043 against 1,087); a Laravel page that sleeps: no difference | not built |
+| `Pool::with`: two PHP calls less when a connection is given back (candidate 25) | 1.35 → 1.23 µs inside the server, inside the noise of the probe; no change in requests per second | not kept |
+| One clock read less in a call of the thread's loop (candidate 32) | Not built: 0.1% of a request with two queries, and Go and C would have to agree on one clock | – |
 
 ## Where the time goes now
 

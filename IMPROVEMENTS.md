@@ -1456,6 +1456,62 @@ to 40 ns).
 | The GET of step 22, two series of 10 alternating rounds | +4.2% ± 1.4% and -0.0% ± 3.0%: no change |
 | The request that sleeps 50 ms and computes 1 ms, 5 rounds | 1,087 ± 2 against 1,080 ± 4 |
 
+## 25. Before the release: isolated mode's hand-over between two requests
+
+A check of `main` (35e47c9, after the work on the market gaps) against
+v0.5.0 before the next release, and the one change it led to,
+[cairophp/cairo#60](https://github.com/cairophp/cairo/pull/60). The full
+report is in the project's notes; this is the record of what was measured.
+
+Machine and method as in step 22: the cloud VM, the server on two vCPUs,
+wrk on the other two, the GET of step 22 (two MySQL queries) and Laravel
+through Octane, rounds alternating the binaries, means with their standard
+error.
+
+**`main` against v0.5.0: no change in speed, more memory.** The GET at 64
+connections: fibers -0.9% ± 1.8%, isolated -2.2% ± 2.5%, the same p50 and
+p99; with one client 1,814 against 1,727 req/s. Laravel hello and dashboard,
+isolated 40 threads and fibers 4 × 10, within 2% either way. The process
+holds 7 to 12 MB more, and 8.7 MB of it are pages of a binary that grew
+from 23.4 to 35.8 MB (the Mercure hub is 5.8 MB of that: a `nomercure`
+build is 30.0 MB), which this kernel keeps resident whole.
+
+**Isolated mode doubles the cost of a small request.** A hello costs 84 µs
+of CPU in isolated mode and 42 µs in fiber mode, with 2.9 thread switches
+per request against 0.5 (the GET: 300 against 125 µs, 8 switches against
+2). Between an answer and the thread's next request Go ran two goroutines
+in turn while the PHP thread slept: the collector handed the answer to the
+request's goroutine, which woke and gave the thread's slot back (step 16),
+and the next goroutine that waited for a slot woke, encoded its event and
+only then woke the thread. A longer watch of the inbox before the thread
+sleeps (30 µs instead of 6) made the hello slower, 81 to 101 µs: the spin
+takes the CPU that the hand-over needs.
+
+**Change.** The collector gives the slot back itself, right after it hands
+the answer over, so that the goroutine waiting for that thread is the one
+Go runs next (the goroutine readied last goes first on its P), and a
+request encodes its event before it waits for a slot.
+
+| Against `main` | main | #60 | |
+|---|---|---|---|
+| hello, isolated, 4 threads, 64 connections (8 rounds) | 22,734 | 25,003 | +10.0% ± 1.6% |
+| CPU per hello, isolated | 84.5 µs | 77.0 µs | |
+| The GET of step 22, isolated | 5,879 | 6,260 | +6.5% ± 2.7%, p50 10.3 to 9.6 ms |
+| The GET of step 22, fibers | 12,808 | 12,891 | no change |
+| Laravel hello, isolated 40 threads (5 rounds) | 1,741 | 1,781 | +2.3% ± 2.4% |
+| Laravel dashboard, 256 connections, isolated | 432 | 446 | +3.3% ± 3.6%, p99 667 to 633 ms |
+| Laravel fibers 4 × 10, hello and dashboard | 1,987 and 463 | 1,932 and 467 | no change |
+
+Memory is the same within 1 MB. Laravel's gain is inside the noise: one of
+its requests costs about 1.1 ms of CPU here, against the 7.5 µs saved.
+
+**What is left of the hand-over.** A hello in isolated mode still costs 35
+µs of CPU more than in fiber mode. A queue in C from which a thread takes
+its next request before it sleeps could remove most of it, but it is a
+change to the core that recycling, reload, deadlines and classic mode must
+all follow, and it can give Laravel 3% at most. It waits until after the
+release.
+
 ## Tried and not kept
 
 | Change | Result | Branch |
@@ -1490,6 +1546,7 @@ to 40 ns).
 | For the fibers that one tick of the timers wakes: Go's clock begun again between fibers, or those fibers run before a new event (step 24) | A request that sleeps and then computes: 4 to 7% slower with either (1,012 and 1,043 against 1,087); a Laravel page that sleeps: no difference | not built |
 | `Pool::with`: two PHP calls less when a connection is given back (candidate 25) | 1.35 → 1.23 µs inside the server, inside the noise of the probe; no change in requests per second | not kept |
 | One clock read less in a call of the thread's loop (candidate 32) | Not built: 0.1% of a request with two queries, and Go and C would have to agree on one clock | – |
+| Isolated mode: the thread watches its inbox for 30 µs instead of 6 before it sleeps (step 25) | Worse: a hello 81 to 101 µs of CPU, the spin takes the CPU that the hand-over needs | not kept |
 
 ## Where the time goes now
 

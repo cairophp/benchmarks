@@ -1541,6 +1541,7 @@ CPU.
 | A `scripts()`-only thread checks its declaration once | 2,765 | 2,837 | +2.6% |
 | No copy of the environment into `$_SERVER` after that check | 2,824 | 3,156 | +11.8% |
 | The request runs on the thread's own stack, not in a fiber | 3,369 | 5,383 | +60% |
+| The deadline ends the script's own waits on sockets and sleeps (30 s deadline) | 5,133 | 5,010 | noise |
 
 **All of it against `main` (d1f94a4):**
 

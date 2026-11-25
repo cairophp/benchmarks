@@ -1512,6 +1512,51 @@ change to the core that recycling, reload, deadlines and classic mode must
 all follow, and it can give Laravel 3% at most. It waits until after the
 release.
 
+## 26. Classic mode: a PHP request for each request, made cheaper
+
+Classic mode (`concurrency('classic')` with `scripts()`) after the find
+round on all three modes, in one pull request with a commit per change,
+[cairophp/cairo#61](https://github.com/cairophp/cairo/pull/61), and a docs
+note, [cairophp/docs#37](https://github.com/cairophp/docs/pull/37).
+
+Machine and method as in step 22: the cloud VM, the server on two vCPUs,
+wrk on the other two, MariaDB on the last one, 16 classic threads, 64
+connections, rounds alternating the binaries. The real request is a script
+with the two MySQL queries of step 22 (persistent PDO).
+
+**Where a classic request went.** Each one starts a PHP request on its
+thread, so everything a fiber-mode thread does once ran for every request:
+the runtime's files, `server.php`, the declaration sent to Go and compared
+there, `cairo_info()`'s JSON, `Superglobals::fill()`'s filter of
+`$_SERVER` (a `getenv()` per key, each under PHP's process-wide lock: 206
+keys here), PHP's own copy of the environment into `$_SERVER`, and a new
+fiber, whose stack is mapped and unmapped with a TLB shootdown on every
+CPU.
+
+| Change (each against the one before) | before | after | |
+|---|---|---|---|
+| The filter reads the environment with one `getenv()` | 2,566 | 2,712 | +5.7% |
+| A thread keeps its `cairo_info()` answer | 2,691 | 2,850 | +5.9% |
+| `SA_ONSTACK` on PHP's signal handlers once per process | 2,850 | 2,865 | noise, fewer system calls |
+| A `scripts()`-only thread checks its declaration once | 2,765 | 2,837 | +2.6% |
+| No copy of the environment into `$_SERVER` after that check | 2,824 | 3,156 | +11.8% |
+| The request runs on the thread's own stack, not in a fiber | 3,369 | 5,383 | +60% |
+| The deadline ends the script's own waits on sockets and sleeps (30 s deadline) | 5,133 | 5,010 | noise |
+
+**All of it against `main` (d1f94a4):**
+
+| | main | #61 | |
+|---|---|---|---|
+| The real request (8 rounds) | 2,524 ± 34, 779 µs CPU | 5,440 ± 39, 353 µs CPU | +116%, p50 24.6 to 11.1 ms |
+| hello.php (6 rounds) | 4,326 ± 65, 447 µs CPU | 14,684 ± 176, 133 µs CPU | 3.4x |
+| The GET of step 22 in fiber mode (6 rounds) | 18,315 ± 297 | 18,929 ± 281 | no change |
+
+The process holds about 7 MB more with 16 classic threads (98 to 105 MB).
+
+**A persistent PDO connection** (docs only) takes the real request from
+757 to 630 µs of CPU, about 20% more requests a second, as it does under
+PHP-FPM.
+
 ## Tried and not kept
 
 | Change | Result | Branch |
@@ -1547,6 +1592,8 @@ release.
 | `Pool::with`: two PHP calls less when a connection is given back (candidate 25) | 1.35 → 1.23 µs inside the server, inside the noise of the probe; no change in requests per second | not kept |
 | One clock read less in a call of the thread's loop (candidate 32) | Not built: 0.1% of a request with two queries, and Go and C would have to agree on one clock | – |
 | Isolated mode: the thread watches its inbox for 30 µs instead of 6 before it sleeps (step 25) | Worse: a hello 81 to 101 µs of CPU, the spin takes the CPU that the hand-over needs | not kept |
+| Classic mode: `$_SERVER` and `$_COOKIE` built in C instead of PHP (step 26) | Built and identical on 11 edge cases, but 3,413 against 3,400 req/s: about 2 µs of a request | not kept |
+| Classic mode: a classic thread's fiber ends with its request instead of waiting for the next job (step 26) | -4.5%: the stack is unmapped either way when the PHP request ends; running on the thread's own stack is what removed it | not kept |
 
 ## Where the time goes now
 

@@ -1557,6 +1557,41 @@ The process holds about 7 MB more with 16 classic threads (98 to 105 MB).
 757 to 630 µs of CPU, about 20% more requests a second, as it does under
 PHP-FPM.
 
+## 27. PostgreSQL: PHP's own pdo_pgsql on libpq instead of Cairo's Go driver
+
+[cairophp/cairo#78](https://github.com/cairophp/cairo/pull/78), docs
+[cairophp/docs#48](https://github.com/cairophp/docs/pull/48).
+
+**What it changes.** Cairo's driver for PDO pgsql was C on the PDO side and
+pgx in Go. Each query was a Go operation: two crossings, a goroutine, and
+results that went through Go's memory before PHP's. PHP's own `pdo_pgsql` on
+libpq now does the work, and only libpq's waits are Cairo's: libpq waits in
+`poll()`, which the binary defines, and that parks the fiber on the
+thread's epoll. A new connection has `PDO::PGSQL_ATTR_DISABLE_PREPARES` on:
+pdo_pgsql's own default prepares, executes and deallocates each statement,
+three round trips, which measured 42 to 54% slower in the prototype.
+
+Machine and method as in step 22: the cloud VM, server on two vCPUs, wrk on
+the other two, 64 connections, 12 rounds alternating the binaries for each
+mode. The real request makes two PostgreSQL queries (`/api/pgitems`).
+
+| Mode | main (1c3fd91) | #78 | paired |
+|---|---|---|---|
+| fibers | 6,481 ± 280 req/s, 230.6 µs CPU | 8,536 ± 272, 153.6 µs CPU | **+33.5% ± 5.1** |
+| isolated | 3,229 ± 80, 491.4 µs CPU | 4,733 ± 138, 327.7 µs CPU | **+47.4% ± 5.5** |
+
+p50 goes from 8.9 to 6.7 ms in fiber mode and 18.9 to 12.6 ms in isolated
+mode. The process holds 3 to 8 MB more, because libpq and its OpenSSL are
+now linked in.
+
+**Why the async variant (B) lost.** B was a driver of our own on libpq's
+asynchronous API. Its p99 had a tail of about 1 s. The cause was its cancel
+path: when a client left, B called the blocking `PQcancel` and then drained
+with `poll(fd, 1000)` on the thread. libpq had already read the reply into
+its TLS buffer, so that poll waited its full second with every fiber of the
+thread. #78 never waits on the thread for a query that was cut: it shuts
+that connection's socket instead.
+
 ## Tried and not kept
 
 | Change | Result | Branch |
@@ -1594,6 +1629,7 @@ PHP-FPM.
 | Isolated mode: the thread watches its inbox for 30 µs instead of 6 before it sleeps (step 25) | Worse: a hello 81 to 101 µs of CPU, the spin takes the CPU that the hand-over needs | not kept |
 | Classic mode: `$_SERVER` and `$_COOKIE` built in C instead of PHP (step 26) | Built and identical on 11 edge cases, but 3,413 against 3,400 req/s: about 2 µs of a request | not kept |
 | Classic mode: a classic thread's fiber ends with its request instead of waiting for the next job (step 26) | -4.5%: the stack is unmapped either way when the PHP request ends; running on the thread's own stack is what removed it | not kept |
+| Cairo's own async driver on libpq (variant B, step 27) | Same speed class as #78, but a second driver to maintain (notify, COPY, large objects still to write), and its cancel path stalled the thread for 1 s | not kept |
 
 ## Where the time goes now
 

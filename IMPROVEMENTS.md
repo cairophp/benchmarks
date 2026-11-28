@@ -1592,6 +1592,31 @@ its TLS buffer, so that poll waited its full second with every fiber of the
 thread. #78 never waits on the thread for a query that was cut: it shuts
 that connection's socket instead.
 
+## 28. opcache's JIT on by default, and libpq looked for once
+
+[cairophp/cairo#82](https://github.com/cairophp/cairo/pull/82) (JIT), docs
+[cairophp/docs#51](https://github.com/cairophp/docs/pull/51);
+[cairophp/cairo#81](https://github.com/cairophp/cairo/pull/81) (libpq).
+
+**JIT.** PHP 8.4 turned opcache's JIT off by default. The server now
+defaults to `opcache.jit = tracing` with a 64 MB buffer where PHP has the
+JIT, and a `php.ini` that sets it keeps its value. Cloud VM as in step 22,
+native build, PHP 8.5, the same `php.ini` (no JIT line) for both binaries:
+
+| Case | main (c2d54f6) | #82 | paired | RSS |
+|---|---|---|---|---|
+| Laravel hello via Octane, isolated, 8 threads, 6 rounds | 2,045 req/s, 974 µs CPU, p99 53.6 ms | 2,288, 870 µs, p99 49.5 ms | **+12.1% ± 3.5** | 141 → 165 MB |
+| real GET (MySQL), isolated, 16 threads, 8 rounds | 11,077, 173 µs | 12,420, 154 µs | **+12.3% ± 2.3** | 120 → 133 MB |
+| real GET (MySQL), fibers, 8 rounds | 15,877, 109 µs | 16,637, 104 µs | **+4.9% ± 1.3** | 91 → 102 MB |
+
+**libpq.** Where libpq is a shared library, the binary's `poll()` told
+libpq's calls from the others by their return address, and while no libpq
+was loaded (an app without pdo_pgsql) it looked for one on every `poll()`
+with `dl_iterate_phdr()` and `strstr()`: 2% of the CPU of a MySQL app in
+isolated mode by `perf` (`strstr` 1.67%, `dl_iterate_phdr` 0.29%), gone
+after #81. wrk on 16 alternating rounds stays inside the noise: isolated
++1.8% ± 2.2, classic +3.1% ± 2.2.
+
 ## Tried and not kept
 
 | Change | Result | Branch |
